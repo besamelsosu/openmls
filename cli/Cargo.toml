@@ -16,12 +16,13 @@ openmls = { path = "../openmls", features = ["test-utils"] }
 ds-lib = { path = "../delivery-service/ds-lib" }
 openmls_traits = { workspace = true }
 openmls_rust_crypto = { workspace = true }
-openmls_memory_storage = { workspace = true, features = ["persistence"] }
+openmls_sqlite_storage = { workspace = true }
 openmls_basic_credential = { workspace = true }
 serde = { version = "^1.0" }
 thiserror = "2.0"
 serde_json = "1.0"
 rand_chacha = { version = "0.3.1" }
+rusqlite = { version = "0.32" }
 
 [dependencies.termion]
 version = "1.5"

@@ -15,3 +15,7 @@ fuzz/artifacts
 *.iws
 *.iml
 *.ipr
+
+# VSCode IDE
+.vscode/
+.devcontainer/

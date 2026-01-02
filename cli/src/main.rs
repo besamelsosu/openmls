@@ -28,6 +28,9 @@ const HELP: &str = "
 >>>         - invite {client name}              invite a user to the group
 >>>         - read                              read messages sent to the group (max 100)
 >>>         - update                            update the client state
+>>>         - exit                              exit group operations
+>>>     - help                                 print this help message
+>>>     - exit                                 exit the CLI
 
 ";
 
@@ -66,13 +69,24 @@ fn main() {
         // There's no persistence. So once the client app stops you have to
         // register a new client.
         if let Some(client_name) = op.strip_prefix("register ") {
-            client = Some(user::User::new(client_name.to_string()));
-            client.as_mut().unwrap().add_key_package();
-            client.as_mut().unwrap().add_key_package();
-            client.as_mut().unwrap().register();
-            stdout
-                .write_all(format!("registered new client {client_name}\n\n").as_bytes())
-                .unwrap();
+            match user::User::new(client_name.to_string()) {
+                Ok(mut new_client) => {
+                    new_client.add_key_package();
+                    new_client.add_key_package();
+                    new_client.register();
+                    client = Some(new_client);
+                    stdout
+                        .write_all(format!("registered new client {client_name}\n\n").as_bytes())
+                        .unwrap();
+                }
+                Err(e) => {
+                    stdout
+                        .write_all(
+                            format!("Error creating client {client_name}: {e}\n\n").as_bytes(),
+                        )
+                        .unwrap();
+                }
+            }
             continue;
         }
 
@@ -111,11 +125,21 @@ fn main() {
         // Save the current client state.
         if op == "save" {
             if let Some(client) = &mut client {
-                client.save();
-                let name = &client.identity.borrow().identity_as_string();
-                stdout
-                    .write_all(format!(" >>> client {name} state saved\n\n").as_bytes())
-                    .unwrap();
+                match client.save() {
+                    Ok(()) => {
+                        let name = &client.identity.borrow().identity_as_string();
+                        stdout
+                            .write_all(format!(" >>> client {name} state saved\n\n").as_bytes())
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        stdout
+                            .write_all(
+                                format!(" >>> Error saving client state: {e}\n\n").as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                }
             } else {
                 stdout
                     .write_all(b" >>> No client to update :(\n\n")
@@ -271,6 +295,11 @@ fn main() {
             continue;
         }
 
+        if op == "exit" {
+            stdout.write_all(b" >>> Leaving CLI \n\n").unwrap();
+            break;
+        }
+
         stdout
             .write_all(b" >>> unknown command :(\n >>> try help\n\n")
             .unwrap();
@@ -288,13 +317,13 @@ fn basic_test() {
     const MESSAGE_3: &str = "Thanks so much for the warm welcome! 😊";
 
     // Create one client
-    let mut client_1 = user::User::new("Client1".to_string());
+    let mut client_1 = user::User::new("Client1".to_string()).unwrap();
 
     // Create another client
-    let mut client_2 = user::User::new("Client2".to_string());
+    let mut client_2 = user::User::new("Client2".to_string()).unwrap();
 
     // Create another client
-    let mut client_3 = user::User::new("Client3".to_string());
+    let mut client_3 = user::User::new("Client3".to_string()).unwrap();
 
     // Update the clients to know about the other clients.
     client_1.update(None).unwrap();
