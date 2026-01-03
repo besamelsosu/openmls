@@ -16,14 +16,16 @@ use openmls::prelude::*;
 /// Information about a client.
 /// To register a new client create a new `ClientInfo` and send it to
 /// `/clients/register`.
-#[derive(Debug, Default, Clone, TlsSize, TlsSerialize, TlsDeserialize)]
+#[derive(Debug, Default, Clone, TlsSize, TlsSerialize, TlsDeserialize, serde::Serialize, serde::Deserialize)]
 pub struct ClientInfo {
     pub id: Vec<u8>,
     pub key_packages: ClientKeyPackages,
     /// map of reserved key_packages [group_id, key_package_hash]
     #[tls_codec(with = "hashset_codec")]
     pub reserved_key_pkg_hash: HashSet<Vec<u8>>,
+    #[serde(with = "mls_message_serde")]
     pub msgs: Vec<MlsMessageIn>,
+    #[serde(with = "mls_message_serde")]
     pub welcome_queue: Vec<MlsMessageIn>,
     pub auth_token: AuthToken,
 }
@@ -61,6 +63,41 @@ mod hashset_codec {
     pub fn tls_deserialize<R: Read>(bytes: &mut R) -> Result<HashSet<Vec<u8>>, tls_codec::Error> {
         let vec = Vec::<Vec<u8>>::tls_deserialize(bytes)?;
         Ok(vec.into_iter().collect::<HashSet<_>>())
+    }
+}
+
+mod mls_message_serde {
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeSeq};
+    use openmls::prelude::MlsMessageIn;
+    use openmls::prelude::tls_codec::Serialize as TlsSerialize;
+    use openmls::prelude::tls_codec::Deserialize as TlsDeserialize;
+
+    pub fn serialize<S>(msgs: &Vec<MlsMessageIn>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(msgs.len()))?;
+        for msg in msgs {
+            let bytes = msg
+                .tls_serialize_detached()
+                .map_err(serde::ser::Error::custom)?;
+            seq.serialize_element(&bytes)?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<MlsMessageIn>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes_vec: Vec<Vec<u8>> = Deserialize::deserialize(deserializer)?;
+        let mut msgs = Vec::new();
+        for bytes in bytes_vec {
+            let msg = MlsMessageIn::tls_deserialize(&mut &bytes[..])
+                .map_err(serde::de::Error::custom)?;
+            msgs.push(msg);
+        }
+        Ok(msgs)
     }
 }
 

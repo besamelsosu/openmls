@@ -60,7 +60,7 @@ impl User {
             identity: RefCell::new(Identity::new(CIPHERSUITE, &provider, user_name.as_bytes())),
             backend: Backend::default(),
             provider,
-            autosave_enabled: false,
+            autosave_enabled: true,
             auth_token: None,
         };
         Ok(out)

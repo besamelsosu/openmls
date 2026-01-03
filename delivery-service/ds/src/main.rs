@@ -36,7 +36,9 @@ use clap::Command;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::Arc;
 use tls_codec::{Deserialize, Serialize, TlsSliceU16, TlsVecU32};
+use std::path::PathBuf;
 
 use ds_lib::{
     messages::{
@@ -52,7 +54,7 @@ mod test;
 
 /// The DS state.
 /// It holds a list of clients and their information.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DsData {
     // (ClientIdentity, ClientInfo)
     clients: Mutex<HashMap<Vec<u8>, ClientInfo>>,
@@ -411,6 +413,58 @@ async fn msg_recv(
 
 // === Main function driving the DS ===
 
+/// Get the path to the state file in the system temp directory.
+fn get_state_file_path() -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push("openmls_ds_state.bin");
+    path
+}
+
+/// Load the DS state from disk if it exists.
+fn load_state() -> DsData {
+    let path = get_state_file_path();
+    if path.exists() {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match bincode::deserialize::<DsData>(&bytes) {
+                    Ok(data) => {
+                        log::info!("Loaded DS state from {}", path.display());
+                        return data;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to deserialize DS state: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to read DS state file: {}", e);
+            }
+        }
+    }
+    log::info!("Starting with fresh DS state");
+    DsData::default()
+}
+
+/// Save the DS state to disk.
+fn save_state(data: &DsData) {
+    let path = get_state_file_path();
+    match bincode::serialize(data) {
+        Ok(bytes) => {
+            match std::fs::write(&path, &bytes) {
+                Ok(_) => {
+                    log::debug!("Saved DS state to {}", path.display());
+                }
+                Err(e) => {
+                    log::error!("Failed to write DS state file: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to serialize DS state: {}", e);
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     pretty_env_logger::init();
@@ -429,8 +483,8 @@ async fn main() -> std::io::Result<()> {
         )
         .get_matches();
 
-    // The data this app operates on.
-    let data = web::Data::new(DsData::default());
+    // The data this app operates on - load from disk if available.
+    let data = Arc::new(load_state());
 
     // Set default port or use port provided on the command line.
     let port = matches.get_one("port").unwrap_or(&8080u16);
@@ -439,10 +493,13 @@ async fn main() -> std::io::Result<()> {
     let addr = format!("{ip}:{port}");
     log::info!("Listening on: {addr}");
 
-    // Start the server.
-    HttpServer::new(move || {
+    // Keep a clone for saving on shutdown
+    let data_for_shutdown = data.clone();
+
+    // Start the server and save state on shutdown
+    let result = HttpServer::new(move || {
         App::new()
-            .app_data(data.clone())
+            .app_data(web::Data::from(data.clone()))
             .service(register_client)
             .service(list_clients)
             .service(publish_key_packages)
@@ -455,5 +512,11 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(addr)?
     .run()
-    .await
+    .await;
+
+    // Save state before shutting down
+    log::info!("Server shutting down, saving state...");
+    save_state(&data_for_shutdown);
+
+    result
 }
