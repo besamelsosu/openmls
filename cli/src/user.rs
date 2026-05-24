@@ -1,8 +1,5 @@
 use std::borrow::Borrow;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::path::PathBuf;
 use std::{cell::RefCell, collections::HashMap, str};
 
 use ds_lib::messages::AuthToken;
@@ -18,7 +15,7 @@ use super::{
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct Contact {
     id: Vec<u8>,
 }
@@ -62,8 +59,8 @@ pub enum PostUpdateActions {
 
 impl User {
     /// Create a new user with the given name and a fresh set of credentials.
-    pub fn new(username: String) -> Self {
-        let crypto = OpenMlsRustPersistentCrypto::default();
+    pub fn new(username: String) -> Result<Self, String> {
+        let crypto = OpenMlsRustPersistentCrypto::new(&username)?;
         let out = Self {
             groups: RefCell::new(HashMap::new()),
             group_list: HashSet::new(),
@@ -74,96 +71,148 @@ impl User {
             autosave_enabled: false,
             auth_token: None,
         };
-        out
+        out.persist_metadata()?;
+        Ok(out)
     }
 
-    fn get_file_path(user_name: &str) -> PathBuf {
-        openmls_memory_storage::persistence::get_file_path(
-            &("openmls_cli_".to_owned() + user_name + ".json"),
-        )
+    fn metadata_key(user_name: &str, field: &str) -> Vec<u8> {
+        format!("user:{}:{}", user_name, field).into_bytes()
     }
 
-    fn load_from_file(input_file: &File) -> Result<Self, String> {
-        // Prepare file reader.
-        let reader = BufReader::new(input_file);
+    fn persist_metadata(&self) -> Result<(), String> {
+        let user_name = self.username();
 
-        // Read the JSON contents of the file as an instance of `User`.
-        match serde_json::from_reader::<BufReader<&File>, User>(reader) {
-            Ok(user) => Ok(user),
-            Err(e) => Result::Err(e.to_string()),
-        }
+        // Convert HashMap<Vec<u8>, Contact> to Vec<(Vec<u8>, Contact)> for JSON serialization
+        let contacts_vec: Vec<(Vec<u8>, Contact)> = self
+            .contacts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let contacts_json = serde_json::to_string(&contacts_vec).map_err(|e| e.to_string())?;
+        let group_list_json = serde_json::to_string(&self.group_list).map_err(|e| e.to_string())?;
+        let auth_token_json = serde_json::to_string(&self.auth_token).map_err(|e| e.to_string())?;
+        let identity_json =
+            serde_json::to_string(&*self.identity.borrow()).map_err(|e| e.to_string())?;
+
+        self.provider
+            .write_value(
+                Self::metadata_key(&user_name, "contacts"),
+                contacts_json.into_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+        self.provider
+            .write_value(
+                Self::metadata_key(&user_name, "group_list"),
+                group_list_json.into_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+        self.provider
+            .write_value(
+                Self::metadata_key(&user_name, "auth_token"),
+                auth_token_json.into_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+        self.provider
+            .write_value(
+                Self::metadata_key(&user_name, "identity"),
+                identity_json.into_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    fn load_metadata(
+        user_name: &str,
+        provider: &OpenMlsRustPersistentCrypto,
+    ) -> Result<
+        (
+            HashMap<Vec<u8>, Contact>,
+            HashSet<String>,
+            Option<AuthToken>,
+            Option<Identity>,
+        ),
+        String,
+    > {
+        let contacts_bytes = provider
+            .read_value(Self::metadata_key(user_name, "contacts"))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let group_list_bytes = provider
+            .read_value(Self::metadata_key(user_name, "group_list"))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let auth_token_bytes = provider
+            .read_value(Self::metadata_key(user_name, "auth_token"))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let identity_bytes = provider
+            .read_value(Self::metadata_key(user_name, "identity"))
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+
+        let contacts: HashMap<Vec<u8>, Contact> = if contacts_bytes.is_empty() {
+            HashMap::new()
+        } else {
+            let contacts_vec: Vec<(Vec<u8>, Contact)> =
+                serde_json::from_slice(&contacts_bytes).map_err(|e| e.to_string())?;
+            contacts_vec.into_iter().collect()
+        };
+        let group_list: HashSet<String> = if group_list_bytes.is_empty() {
+            HashSet::new()
+        } else {
+            serde_json::from_slice(&group_list_bytes).map_err(|e| e.to_string())?
+        };
+        let auth_token: Option<AuthToken> = if auth_token_bytes.is_empty() {
+            None
+        } else {
+            serde_json::from_slice(&auth_token_bytes).map_err(|e| e.to_string())?
+        };
+        let identity: Option<Identity> = if identity_bytes.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_slice(&identity_bytes).map_err(|e| e.to_string())?)
+        };
+
+        Ok((contacts, group_list, auth_token, identity))
     }
 
     pub fn load(user_name: String) -> Result<Self, String> {
-        let input_path = User::get_file_path(&user_name);
+        let provider = OpenMlsRustPersistentCrypto::new(&user_name)?;
+        let (contacts, group_list, auth_token, identity) =
+            Self::load_metadata(&user_name, &provider)?;
 
-        match File::open(input_path) {
-            Err(e) => {
-                log::error!("Error loading user state: {:?}", e.to_string());
-                Err(e.to_string())
-            }
-            Ok(input_file) => {
-                let user_result = User::load_from_file(&input_file);
+        let identity = match identity {
+            Some(id) => id,
+            None => return Err(format!("No saved identity found for user {}", user_name)),
+        };
 
-                if user_result.is_ok() {
-                    let mut user = user_result.ok().unwrap();
-                    match user.provider.load_keystore(user_name) {
-                        Ok(_) => {
-                            let groups = user.groups.get_mut();
-                            for group_name in &user.group_list {
-                                let mlsgroup = MlsGroup::load(
-                                    user.provider.storage(),
-                                    &GroupId::from_slice(group_name.as_bytes()),
-                                );
-                                let grp = Group {
-                                    mls_group: RefCell::new(mlsgroup.unwrap().unwrap()),
-                                    group_name: group_name.clone(),
-                                    conversation: Conversation::default(),
-                                };
-                                groups.insert(group_name.clone(), grp);
-                            }
-                            Ok(user)
-                        }
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    user_result
-                }
-            }
+        let mut user = Self {
+            groups: RefCell::new(HashMap::new()),
+            group_list,
+            contacts,
+            identity: RefCell::new(identity),
+            backend: Backend::default(),
+            provider,
+            autosave_enabled: false,
+            auth_token,
+        };
+
+        let groups = user.groups.get_mut();
+        for group_name in &user.group_list {
+            let mlsgroup = MlsGroup::load(
+                user.provider.storage(),
+                &GroupId::from_slice(group_name.as_bytes()),
+            );
+            let grp = Group {
+                mls_group: RefCell::new(mlsgroup.unwrap().unwrap()),
+                group_name: group_name.clone(),
+                conversation: Conversation::default(),
+            };
+            groups.insert(group_name.clone(), grp);
         }
-    }
 
-    fn save_to_file(&self, output_file: &File) {
-        let writer = BufWriter::new(output_file);
-        match serde_json::to_writer_pretty(writer, &self) {
-            Ok(()) => log::info!("User serialized"),
-            Err(e) => log::error!("Error serializing user: {:?}", e.to_string()),
-        }
-    }
-
-    pub fn save(&mut self) {
-        let output_path = User::get_file_path(&self.identity.borrow().identity_as_string());
-        match File::create(output_path) {
-            Err(e) => log::error!("Error saving user state: {:?}", e.to_string()),
-            Ok(output_file) => {
-                self.save_to_file(&output_file);
-
-                match self.provider.save_keystore(self.username()) {
-                    Ok(_) => log::info!("User state saved"),
-                    Err(e) => log::error!("Error saving user state : {:?}", e.to_string()),
-                }
-            }
-        }
-    }
-
-    pub fn enable_auto_save(&mut self) {
-        self.autosave_enabled = true;
-    }
-
-    fn autosave(&mut self) {
-        if self.autosave_enabled {
-            self.save();
-        }
+        Ok(user)
     }
 
     /// Add a key package to the user identity and return the pair [key package
@@ -207,13 +256,17 @@ impl User {
         Vec::from_iter(kpgs)
     }
 
-    pub fn register(&mut self) {
+    pub fn register(&mut self) -> Result<(), String> {
         match self.backend.register_client(self.key_packages()) {
             Ok(token) => {
                 log::debug!("Created new user: {:?}", self.username());
-                self.set_auth_token(token)
+                self.set_auth_token(token);
+                self.persist_metadata()
             }
-            Err(e) => log::error!("Error creating user: {e:?}"),
+            Err(e) => {
+                log::error!("Error creating user: {e:?}");
+                Err(format!("Error creating user: {e:?}"))
+            }
         }
     }
 
@@ -535,13 +588,13 @@ impl User {
 
         self.update_clients();
 
-        self.autosave();
+        self.persist_metadata()?;
 
         Ok(messages_out)
     }
 
     /// Create a group with the given name.
-    pub fn create_group(&mut self, name: String) {
+    pub fn create_group(&mut self, name: String) -> Result<(), String> {
         log::debug!("{} creates group {}", self.username(), name);
         let group_id = name.as_bytes();
 
@@ -570,9 +623,11 @@ impl User {
             panic!("Group '{name}' existed already");
         }
 
-        self.groups.borrow_mut().insert(name, group);
+        self.groups.borrow_mut().insert(name.clone(), group);
 
-        self.autosave();
+        self.group_list.insert(name);
+        self.persist_metadata()?;
+        Ok(())
     }
 
     /// Invite user with the given name to the group.
@@ -628,7 +683,7 @@ impl User {
 
         drop(groups);
 
-        self.autosave();
+        self.persist_metadata()?;
 
         Ok(())
     }
@@ -675,7 +730,7 @@ impl User {
 
         drop(groups);
 
-        self.autosave();
+        self.persist_metadata()?;
 
         Ok(())
     }

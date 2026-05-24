@@ -18,9 +18,7 @@ const HELP: &str = "
 >>>     - update                                update the client state
 >>>     - reset                                 reset the server
 >>>     - register {client name}                register a new client
->>>     - save {client name}                    serialize and save the client state
->>>     - load {client name}                    load and deserialize the client state as a new client
->>>     - autosave                              enable automatic save of the current client state upon each update
+>>>     - load {client name}                    load the client state as a new client
 >>>     - create kp                             create a new key package
 >>>     - create group {group name}             create a new group
 >>>     - group {group name}                    group operations
@@ -66,13 +64,37 @@ fn main() {
         // There's no persistence. So once the client app stops you have to
         // register a new client.
         if let Some(client_name) = op.strip_prefix("register ") {
-            client = Some(user::User::new(client_name.to_string()));
-            client.as_mut().unwrap().add_key_package();
-            client.as_mut().unwrap().add_key_package();
-            client.as_mut().unwrap().register();
-            stdout
-                .write_all(format!("registered new client {client_name}\n\n").as_bytes())
-                .unwrap();
+            match user::User::new(client_name.to_string()) {
+                Ok(mut user) => {
+                    user.add_key_package();
+                    user.add_key_package();
+                    match user.register() {
+                        Ok(()) => {
+                            stdout
+                                .write_all(
+                                    format!("registered new client {client_name}\n\n").as_bytes(),
+                                )
+                                .unwrap();
+                            client = Some(user);
+                        }
+                        Err(e) => {
+                            stdout
+                                .write_all(
+                                    format!("Error registering client {client_name} : {e}\n\n")
+                                        .as_bytes(),
+                                )
+                                .unwrap();
+                        }
+                    }
+                }
+                Err(e) => {
+                    stdout
+                        .write_all(
+                            format!("Error creating client {client_name} : {e}\n\n").as_bytes(),
+                        )
+                        .unwrap();
+                }
+            }
             continue;
         }
 
@@ -108,45 +130,23 @@ fn main() {
             continue;
         }
 
-        // Save the current client state.
-        if op == "save" {
-            if let Some(client) = &mut client {
-                client.save();
-                let name = &client.identity.borrow().identity_as_string();
-                stdout
-                    .write_all(format!(" >>> client {name} state saved\n\n").as_bytes())
-                    .unwrap();
-            } else {
-                stdout
-                    .write_all(b" >>> No client to update :(\n\n")
-                    .unwrap();
-            }
-            continue;
-        }
-
-        // Enable automatic saving of the client state.
-        if op == "autosave" {
-            if let Some(client) = &mut client {
-                client.enable_auto_save();
-                let name = &client.identity.borrow().identity_as_string();
-                stdout
-                    .write_all(format!(" >>> autosave enabled for client {name} \n\n").as_bytes())
-                    .unwrap();
-            } else {
-                stdout
-                    .write_all(b" >>> No client to update :(\n\n")
-                    .unwrap();
-            }
-            continue;
-        }
-
         // Create a new group.
         if let Some(group_name) = op.strip_prefix("create group ") {
             if let Some(client) = &mut client {
-                client.create_group(group_name.to_string());
-                stdout
-                    .write_all(format!(" >>> Created group {group_name} :)\n\n").as_bytes())
-                    .unwrap();
+                match client.create_group(group_name.to_string()) {
+                    Ok(()) => {
+                        stdout
+                            .write_all(format!(" >>> Created group {group_name} :)\n\n").as_bytes())
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        stdout
+                            .write_all(
+                                format!("Error creating group {group_name} : {e}\n\n").as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                }
             } else {
                 stdout
                     .write_all(b" >>> No client to create a group :(\n\n")
@@ -288,13 +288,22 @@ fn basic_test() {
     const MESSAGE_3: &str = "Thanks so much for the warm welcome! 😊";
 
     // Create one client
-    let mut client_1 = user::User::new("Client1".to_string());
+    let mut client_1 = user::User::new("Client1".to_string()).unwrap();
+    client_1.add_key_package();
+    client_1.add_key_package();
+    client_1.register().unwrap();
 
     // Create another client
-    let mut client_2 = user::User::new("Client2".to_string());
+    let mut client_2 = user::User::new("Client2".to_string()).unwrap();
+    client_2.add_key_package();
+    client_2.add_key_package();
+    client_2.register().unwrap();
 
     // Create another client
-    let mut client_3 = user::User::new("Client3".to_string());
+    let mut client_3 = user::User::new("Client3".to_string()).unwrap();
+    client_3.add_key_package();
+    client_3.add_key_package();
+    client_3.register().unwrap();
 
     // Update the clients to know about the other clients.
     client_1.update(None).unwrap();
@@ -302,7 +311,9 @@ fn basic_test() {
     client_3.update(None).unwrap();
 
     // Client 1 creates a group.
-    client_1.create_group("MLS Discussions".to_string());
+    client_1
+        .create_group("MLS Discussions".to_string())
+        .unwrap();
 
     // Client 1 adds Client 2 to the group.
     client_1
