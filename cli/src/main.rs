@@ -15,19 +15,102 @@ mod user;
 
 const HELP: &str = "
 >>> Available commands:
->>>     - update                                update the client state
->>>     - reset                                 reset the server
->>>     - register {client name}                register a new client
->>>     - load {client name}                    load the client state as a new client
->>>     - create kp                             create a new key package
->>>     - create group {group name}             create a new group
->>>     - group {group name}                    group operations
->>>         - send {message}                    send message to group
->>>         - invite {client name}              invite a user to the group
->>>         - read                              read messages sent to the group (max 100)
->>>         - update                            update the client state
-
+>>>     - create group {group name}    create a new group
+>>>     - create kp                    create a new key package
+>>>     - exit                         exit the CLI
+>>>     - group {group name}           enter group submenu for operations
+>>>     - help                         print this help message
+>>>     - info                         show current user details
+>>>     - load {client name}           load the client state as a new client
+>>>     - register {client name}       register a new client
+>>>     - reset                        reset the server
+>>>     - update                       update the client state
 ";
+
+const GROUP_HELP: &str = "
+>>> Group submenu commands:
+>>>     - exit                         leave the group submenu
+>>>     - help                         print this group help message
+>>>     - info                         show details for the current group
+>>>     - invite {client name}         invite a user to the group
+>>>     - read                         read messages sent to the group
+>>>     - remove {client name}         remove a user from the group
+>>>     - send {message}               send a message to the group
+>>>     - update                       update the client state for the group
+";
+
+fn print_help(stdout: &mut StdoutLock, help_text: &str) {
+    stdout.write_all(help_text.as_bytes()).unwrap();
+}
+
+fn print_user_info(stdout: &mut StdoutLock, client: &Option<user::User>) {
+    match client {
+        Some(client) => {
+            let username = client.username();
+            let group_names = client.group_names();
+            let group_count = group_names.len();
+            let contact_names = client.contact_names();
+            let contact_count = contact_names.len();
+            let kp_count = client.key_packages().len();
+
+            stdout.write_all(b" >>> User info:\n").unwrap();
+            stdout
+                .write_all(format!("     Username: {username}\n").as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Groups: {group_count}\n").as_bytes())
+                .unwrap();
+            if group_count > 0 {
+                stdout
+                    .write_all(format!("     Group names: {group_names:?}\n").as_bytes())
+                    .unwrap();
+            }
+            stdout
+                .write_all(format!("     Known contacts: {contact_count}\n").as_bytes())
+                .unwrap();
+            if contact_count > 0 {
+                stdout
+                    .write_all(format!("     Contact names: {contact_names:?}\n").as_bytes())
+                    .unwrap();
+            }
+            stdout
+                .write_all(format!("     Key packages: {kp_count}\n\n").as_bytes())
+                .unwrap();
+        }
+        None => {
+            stdout
+                .write_all(b" >>> No user registered or loaded.\n\n")
+                .unwrap();
+        }
+    }
+}
+
+fn print_group_info(stdout: &mut StdoutLock, client: &user::User, group_name: &str) {
+    match client.group_member_names(group_name) {
+        Ok(member_names) => {
+            let message_count = client.group_message_count(group_name).unwrap_or(0);
+
+            stdout.write_all(b" >>> Group info:\n").unwrap();
+            stdout
+                .write_all(format!("     Group: {group_name}\n").as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Members: {}\n", member_names.len()).as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Member names: {member_names:?}\n").as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Messages stored locally: {message_count}\n\n").as_bytes())
+                .unwrap();
+        }
+        Err(e) => {
+            stdout
+                .write_all(format!(" >>> {e}\n\n").as_bytes())
+                .unwrap();
+        }
+    }
+}
 
 fn update(client: &mut user::User, group_id: Option<String>, stdout: &mut StdoutLock) {
     let messages = client.update(group_id).unwrap();
@@ -223,6 +306,16 @@ fn main() {
                         continue;
                     }
 
+                    if op2 == "help" {
+                        print_help(&mut stdout, GROUP_HELP);
+                        continue;
+                    }
+
+                    if op2 == "info" {
+                        print_group_info(&mut stdout, client, &group_name);
+                        continue;
+                    }
+
                     // Update the client state.
                     if op2 == "update" {
                         update(client, Some(group_name.to_string()), &mut stdout);
@@ -242,6 +335,11 @@ fn main() {
             } else {
                 stdout.write_all(b" >>> No client :(\n\n").unwrap();
             }
+            continue;
+        }
+
+        if op == "info" {
+            print_user_info(&mut stdout, &client);
             continue;
         }
 
@@ -265,9 +363,14 @@ fn main() {
             continue;
         }
 
+        if op == "exit" {
+            stdout.write_all(b" >>> Goodbye!\n\n").unwrap();
+            break;
+        }
+
         // Print help
         if op == "help" {
-            stdout.write_all(HELP.as_bytes()).unwrap();
+            print_help(&mut stdout, HELP);
             continue;
         }
 

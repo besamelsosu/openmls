@@ -1,6 +1,10 @@
 use std::borrow::Borrow;
 use std::collections::HashSet;
-use std::{cell::RefCell, collections::HashMap, str};
+use std::{
+    cell::{Ref, RefCell},
+    collections::HashMap,
+    str,
+};
 
 use ds_lib::messages::AuthToken;
 use ds_lib::{ClientKeyPackages, GroupMessage};
@@ -21,7 +25,7 @@ pub struct Contact {
 }
 
 impl Contact {
-    fn username(&self) -> String {
+    pub fn username(&self) -> String {
         String::from_utf8(self.id.clone()).unwrap()
     }
 }
@@ -254,6 +258,48 @@ impl User {
         // clone first !
         let kpgs = self.identity.borrow().kp.clone();
         Vec::from_iter(kpgs)
+    }
+
+    fn group(&self, group_name: &str) -> Result<Ref<'_, Group>, String> {
+        let groups = self.groups.borrow();
+        Ref::filter_map(groups, |groups| groups.get(group_name))
+            .map_err(|_| format!("No group with name {group_name} known."))
+    }
+
+    pub fn group_names(&self) -> Vec<String> {
+        let mut group_names: Vec<String> = self.group_list.iter().cloned().collect();
+        group_names.sort();
+        group_names
+    }
+
+    pub fn contact_names(&self) -> Vec<String> {
+        let mut contact_names: Vec<String> = self
+            .contacts
+            .values()
+            .map(|contact| contact.username())
+            .collect();
+        contact_names.sort();
+        contact_names
+    }
+
+    pub fn group_member_names(&self, group_name: &str) -> Result<Vec<String>, String> {
+        let group = self.group(group_name)?;
+        let mls_group = group.mls_group.borrow();
+        let mut member_names = Vec::new();
+        for member in mls_group.members() {
+            let credential = BasicCredential::try_from(member.credential).unwrap();
+            member_names.push(String::from_utf8(credential.identity().to_vec()).unwrap());
+        }
+        member_names.sort();
+        Ok(member_names)
+    }
+
+    pub fn group_message_count(&self, group_name: &str) -> Result<usize, String> {
+        let group = self.group(group_name)?;
+        Ok(group
+            .conversation
+            .get(usize::MAX)
+            .map_or(0, |messages| messages.len()))
     }
 
     pub fn register(&mut self) -> Result<(), String> {
