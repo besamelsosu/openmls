@@ -45,14 +45,12 @@ impl MlsGroup {
         signer: &impl Signer,
         message: &[u8],
     ) -> Result<MlsMessageOut, CreateMessageError<Provider::StorageError>> {
-        let (generation, output) = self
-            .create_message_internal::<_, CreateMessageError<Provider::StorageError>>(
-                provider, signer, message,
-            )?;
+        let (generation, output) = self.create_message_internal(provider, signer, message)?;
         self.confirm_message(provider.storage(), generation)?;
         Ok(output)
     }
 
+    #[cfg(not(feature = "virtual-clients-draft"))]
     fn create_message_internal<Provider: OpenMlsProvider, E>(
         &mut self,
         provider: &Provider,
@@ -69,9 +67,10 @@ impl MlsGroup {
             return Err(MlsGroupStateError::PendingProposal.into());
         }
 
+        let aad = self.outgoing_authenticated_data()?;
         let authenticated_content = AuthenticatedContent::new_application(
             self.own_leaf_index(),
-            &self.aad,
+            &aad,
             message,
             self.context(),
             signer,
@@ -83,6 +82,38 @@ impl MlsGroup {
             .encrypt(authenticated_content, provider)
             // We know the application message is wellformed and we have the key material of the current epoch
             .map_err(|_| LibraryError::custom("Malformed plaintext"))?;
+
+        let output = MlsMessageOut::from_private_message(private_message, self.version());
+        self.reset_aad();
+        Ok((generation, output))
+    }
+
+    #[cfg(feature = "virtual-clients-draft")]
+    fn create_message_internal<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        signer: &impl Signer,
+        message: &[u8],
+    ) -> Result<(u32, MlsMessageOut), CreateMessageError<Provider::StorageError>> {
+        if !self.is_active() {
+            return Err(MlsGroupStateError::UseAfterEviction.into());
+        }
+        if !self.proposal_store().is_empty() {
+            return Err(MlsGroupStateError::PendingProposal.into());
+        }
+
+        let aad = self.outgoing_authenticated_data()?;
+        let authenticated_content = AuthenticatedContent::new_application(
+            self.own_leaf_index(),
+            &aad,
+            message,
+            self.context(),
+            signer,
+        )?;
+        let EncryptionOutput {
+            generation,
+            private_message,
+        } = self.encrypt(authenticated_content, provider)?;
 
         let output = MlsMessageOut::from_private_message(private_message, self.version());
         self.reset_aad();
