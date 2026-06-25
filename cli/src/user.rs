@@ -11,6 +11,8 @@ use ds_lib::{ClientKeyPackages, GroupMessage};
 use openmls::prelude::{tls_codec::*, *};
 use openmls_traits::OpenMlsProvider;
 
+use crate::admin_list_gce::ADMIN_LIST_EXT_TYPE;
+
 use super::{
     backend::Backend, conversation::Conversation, conversation::ConversationMessage,
     identity::Identity, openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto,
@@ -644,10 +646,29 @@ impl User {
         log::debug!("{} creates group {}", self.username(), name);
         let group_id = name.as_bytes();
 
+        let creator_credential = self
+            .identity
+            .borrow()
+            .credential_with_key
+            .credential
+            .clone();
+
+        let admin_ext = crate::admin_list_gce::AdminListExtension::new(vec![creator_credential]);
+        let openmls_ext = admin_ext.to_extension().map_err(|e| e.to_string())?;
+
+        let extensions = openmls::extensions::Extensions::single(openmls_ext)
+            .map_err(|e| format!("Invalid extension configuration: {:?}", e))?;
+
+        let capabilities = Capabilities::builder()
+            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
+            .build();
+
         // NOTE: Since the DS currently doesn't distribute copies of the group's ratchet
         // tree, we need to include the ratchet_tree_extension.
         let group_config = MlsGroupCreateConfig::builder()
             .use_ratchet_tree_extension(true)
+            .with_group_context_extensions(extensions) // Inject the unpacked extensions collection
+            .capabilities(capabilities)
             .build();
 
         let mls_group = MlsGroup::new_with_group_id(
@@ -782,7 +803,7 @@ impl User {
     }
 
     /// Join a group with the provided welcome message.
-    fn join_group(&self, welcome: Welcome) -> Result<(), String> {
+    fn join_group(&mut self, welcome: Welcome) -> Result<(), String> {
         log::debug!("{} joining group ...", self.username());
 
         let mut ident = self.identity.borrow_mut();
@@ -814,6 +835,8 @@ impl User {
         };
 
         log::trace!("   {group_name}");
+
+        self.group_list.insert(group_name.clone());
 
         match self.groups.borrow_mut().insert(group_name, group) {
             Some(old) => Err(format!("Overrode the group {:?}", old.group_name)),

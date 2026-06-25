@@ -5,6 +5,7 @@
 use std::io::{stdin, stdout, StdoutLock, Write};
 use termion::input::TermRead;
 
+mod admin_list_gce;
 mod backend;
 mod conversation;
 mod identity;

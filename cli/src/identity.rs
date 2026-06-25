@@ -4,6 +4,8 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
 
+use crate::admin_list_gce::ADMIN_LIST_EXT_TYPE;
+
 use super::{openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto, serialize_any_hashmap};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -31,7 +33,12 @@ impl Identity {
         };
         signature_keys.store(crypto.storage()).unwrap();
 
+        let capabilities = Capabilities::builder()
+            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
+            .build();
+
         let key_package = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
             .build(
                 ciphersuite,
                 crypto,
@@ -61,7 +68,12 @@ impl Identity {
         ciphersuite: Ciphersuite,
         crypto: &OpenMlsRustPersistentCrypto,
     ) -> KeyPackage {
+        let capabilities = Capabilities::builder()
+            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
+            .build();
+
         let key_package = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
             .build(
                 ciphersuite,
                 crypto,
