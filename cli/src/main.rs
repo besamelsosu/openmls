@@ -260,28 +260,37 @@ fn main() {
 
                     // Invite a client to the group.
                     if let Some(new_client) = op2.strip_prefix("invite ") {
-                        client
-                            .invite(new_client.to_string(), group_name.to_string())
-                            .unwrap();
-                        stdout
-                            .write_all(
-                                format!("added {new_client} to group {group_name}\n\n").as_bytes(),
-                            )
-                            .unwrap();
+                        match client.invite(new_client.to_string(), group_name.to_string()) {
+                            Ok(()) => {
+                                stdout
+                                    .write_all(
+                                        format!("added {new_client} to group {group_name}\n\n")
+                                            .as_bytes(),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(e) => {
+                                println!("Error inviting user: {e}");
+                            }
+                        }
                         continue;
                     }
 
                     // Remove a client from the group.
                     if let Some(rem_client) = op2.strip_prefix("remove ") {
-                        client
-                            .remove(rem_client.to_string(), group_name.to_string())
-                            .unwrap();
-                        stdout
-                            .write_all(
-                                format!("Removed {rem_client} from group {group_name}\n\n")
-                                    .as_bytes(),
-                            )
-                            .unwrap();
+                        match client.remove(rem_client.to_string(), group_name.to_string()) {
+                            Ok(()) => {
+                                stdout
+                                    .write_all(
+                                        format!("Removed {rem_client} from group {group_name}\n\n")
+                                            .as_bytes(),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(e) => {
+                                println!("Error removing user: {e}");
+                            }
+                        }
                         continue;
                     }
 
@@ -444,8 +453,13 @@ fn basic_test() {
         )])
     );
 
-    // Client 2 adds Client 3 to the group.
-    client_2
+    // Client 2 tries to add Client 3 to the group (should fail).
+    assert!(client_2
+        .invite("Client3".to_string(), "MLS Discussions".to_string())
+        .is_err());
+
+    // Client 1 (admin) adds Client 3 to the group (should succeed).
+    client_1
         .invite("Client3".to_string(), "MLS Discussions".to_string())
         .unwrap();
 

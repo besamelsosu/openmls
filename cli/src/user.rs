@@ -11,7 +11,7 @@ use ds_lib::{ClientKeyPackages, GroupMessage};
 use openmls::prelude::{tls_codec::*, *};
 use openmls_traits::OpenMlsProvider;
 
-use crate::admin_list_gce::ADMIN_LIST_EXT_TYPE;
+use crate::admin_list_gce::{AdminListExtension, ADMIN_LIST_EXT_TYPE};
 
 use super::{
     backend::Backend, conversation::Conversation, conversation::ConversationMessage,
@@ -61,6 +61,27 @@ pub struct User {
 pub enum PostUpdateActions {
     None,
     Remove,
+}
+
+fn check_credential_is_admin(
+    extensions: &Extensions<GroupContext>,
+    credential: &Credential,
+) -> Result<(), String> {
+    let mut has_admin_list = false;
+    for ext in extensions.iter() {
+        if let Ok(admin_list) = AdminListExtension::from_extension(ext) {
+            has_admin_list = true;
+            if admin_list.admins.contains(credential) {
+                return Ok(());
+            }
+            break;
+        }
+    }
+    if !has_admin_list {
+        Err("Group context extension for admin list is missing".to_string())
+    } else {
+        Err("Sender is not in the admin list".to_string())
+    }
 }
 
 impl User {
@@ -548,6 +569,16 @@ impl User {
                 None
             }
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
+                let has_add_or_remove = commit_ptr.add_proposals().next().is_some()
+                    || commit_ptr.remove_proposals().next().is_some();
+                if has_add_or_remove {
+                    check_credential_is_admin(
+                        mls_group.extensions(),
+                        &processed_message_credential,
+                    )
+                    .map_err(|e| format!("Authorization error: {e}"))?;
+                }
+
                 let mut remove_proposal: bool = false;
                 if commit_ptr.self_removed() {
                     remove_proposal = true;
@@ -592,9 +623,10 @@ impl User {
             log::debug!("Reading message format {:#?} ...", message.wire_format());
             match message.extract() {
                 MlsMessageBodyIn::Welcome(welcome) => {
-                    // Join the group. (Later we should ask the user to
-                    // approve first ...)
-                    self.join_group(welcome)?;
+                    if let Err(e) = self.join_group(welcome) {
+                        log::error!("Error joining group: {e}");
+                        continue;
+                    }
                 }
                 MlsMessageBodyIn::PrivateMessage(message) => {
                     match self.process_protocol_message(group_name.clone(), message.into()) {
@@ -616,16 +648,17 @@ impl User {
                                 }
                             }
                         }
-                        Err(_e) => {
+                        Err(e) => {
+                            log::error!("Error processing private message: {e}");
                             continue;
                         }
                     };
                 }
                 MlsMessageBodyIn::PublicMessage(message) => {
-                    if self
-                        .process_protocol_message(group_name.clone(), message.into())
-                        .is_err()
+                    if let Err(e) =
+                        self.process_protocol_message(group_name.clone(), message.into())
                     {
+                        log::error!("Error processing public message: {e}");
                         continue;
                     }
                 }
@@ -706,7 +739,10 @@ impl User {
         };
 
         // Reclaim a key package from the server
-        let joiner_key_package = self.backend.consume_key_package(&contact.id).unwrap();
+        let joiner_key_package = self
+            .backend
+            .consume_key_package(&contact.id)
+            .map_err(|e| format!("Failed to reclaim key package from server: {e}"))?;
 
         // Build a proposal with this key package and do the MLS bits.
         let mut groups = self.groups.borrow_mut();
@@ -714,6 +750,14 @@ impl User {
             Some(g) => g,
             None => return Err(format!("No group with name {group_name} known.")),
         };
+
+        // Check authorization
+        {
+            let mls_group = group.mls_group.borrow();
+            let self_credential = &self.identity.borrow().credential_with_key.credential;
+            check_credential_is_admin(mls_group.extensions(), self_credential)
+                .map_err(|e| format!("Authorization error: {e}"))?;
+        }
 
         let (out_messages, welcome, _group_info) = group
             .mls_group
@@ -764,6 +808,14 @@ impl User {
             Some(g) => g,
             None => return Err(format!("No group with name {group_name} known.")),
         };
+
+        // Check authorization
+        {
+            let mls_group = group.mls_group.borrow();
+            let self_credential = &self.identity.borrow().credential_with_key.credential;
+            check_credential_is_admin(mls_group.extensions(), self_credential)
+                .map_err(|e| format!("Authorization error: {e}"))?;
+        }
 
         // Get the client leaf index
 
@@ -818,11 +870,22 @@ impl User {
         let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
-        let mls_group =
+        let staged_welcome =
             StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
-                .expect("Failed to create staged join")
-                .into_group(&self.provider)
-                .expect("Failed to create MlsGroup");
+                .map_err(|e| format!("Failed to create staged join: {:?}", e))?;
+
+        let welcome_sender_leaf = staged_welcome.welcome_sender().map_err(|e| e.to_string())?;
+        let welcome_sender_credential = welcome_sender_leaf.credential();
+
+        check_credential_is_admin(
+            staged_welcome.group_context().extensions(),
+            welcome_sender_credential,
+        )
+        .map_err(|e| format!("Authorization error: {e}"))?;
+
+        let mls_group = staged_welcome
+            .into_group(&self.provider)
+            .map_err(|e| format!("Failed to convert to MlsGroup: {:?}", e))?;
 
         let group_id = mls_group.group_id().to_vec();
         // XXX: Use Welcome's encrypted_group_info field to store group_name.
