@@ -78,6 +78,14 @@ macro_rules! unwrap_data {
     };
 }
 
+/// Try to interpret `bytes` as UTF-8; fall back to `0x<hex>` if it isn't.
+fn bytes_to_display(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => format!("0x{}", hex::encode(bytes)),
+    }
+}
+
 // === API ===
 
 /// Registering a new client takes a serialised `ClientInfo` object and returns
@@ -380,6 +388,48 @@ async fn msg_recv(
     }
 }
 
+async fn debug_dump(State(data): State<Arc<DsData>>) -> Response {
+    let clients_lock = data.clients.lock();
+    let groups_lock  = data.groups.lock();
+
+    let clients: Vec<serde_json::Value> = clients_lock
+        .values()
+        .map(|c| serde_json::json!({
+            "id": bytes_to_display(&c.id),
+            "key_packages": c.key_packages.0.iter()
+                .map(|(hash, _)| hex::encode(hash.as_slice()))
+                .collect::<Vec<_>>(),
+            "reserved_kp_hashes": c.reserved_key_pkg_hash.iter()
+                .map(hex::encode)
+                .collect::<Vec<_>>(),
+            "queued_msgs": c.msgs.len(),
+            "queued_welcomes": c.welcome_queue.len(),
+        }))
+        .collect();
+
+    let groups: Vec<serde_json::Value> = groups_lock
+        .iter()
+        .map(|(id, epoch)| serde_json::json!({
+            "group_id": hex::encode(id),
+            "epoch": epoch,
+        }))
+        .collect();
+
+    let dump = serde_json::json!({
+        "client_count": clients.len(),
+        "group_count": groups.len(),
+        "clients": clients,
+        "groups": groups,
+    });
+
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        dump.to_string(),
+    )
+        .into_response()
+}
+
 /// Build the axum router for the DS.
 fn app(data: Arc<DsData>) -> Router {
     Router::new()
@@ -394,6 +444,7 @@ fn app(data: Arc<DsData>) -> Router {
         .route("/send/message", post(msg_send))
         .route("/recv/{id}", get(msg_recv))
         .route("/reset", get(reset))
+        .route("/debug/dump",                get(debug_dump))
         .with_state(data)
 }
 
