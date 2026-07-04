@@ -560,8 +560,56 @@ impl User {
                     None
                 }
             }
-            ProcessedMessageContent::ProposalMessage(_proposal_ptr) => {
-                // intentionally left blank.
+            ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
+                // Only auto-stage/commit/merge a Remove proposal when the sender
+                // *is* the member being removed (i.e. a genuine self-removal/leave,
+                // not a removal of someone else).
+                let is_self_remove = match proposal_ptr.proposal() {
+                    Proposal::Remove(remove_proposal) => match proposal_ptr.sender() {
+                        Sender::Member(sender_leaf_index) => {
+                            *sender_leaf_index == remove_proposal.removed()
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+
+                if is_self_remove {
+                    // Stage the proposal so commit_to_pending_proposals picks it up.
+                    mls_group
+                        .store_pending_proposal(self.provider.storage(), *proposal_ptr)
+                        .map_err(|e| format!("Error storing pending proposal: {e}"))?;
+
+                    // Drop mls_group borrow_mut before re-borrowing inside commit block
+                    // and before calling recipients() (which borrows immutably).
+                    drop(mls_group);
+
+                    let commit_msg = {
+                        let identity = self.identity.borrow();
+                        match group
+                            .mls_group
+                            .borrow_mut()
+                            .commit_to_pending_proposals(&self.provider, &identity.signer)
+                        {
+                            Ok((commit, _welcome, _group_info)) => commit,
+                            Err(e) => {
+                                log::error!("Error committing to pending proposals: {e:?}");
+                                return Err(e.to_string());
+                            }
+                        }
+                    };
+
+                    let group_recipients = self.recipients(group);
+                    let msg = GroupMessage::new(commit_msg.into(), &group_recipients);
+                    self.backend.send_msg(&msg)?;
+
+                    group
+                        .mls_group
+                        .borrow_mut()
+                        .merge_pending_commit(&self.provider)
+                        .map_err(|e| format!("Error merging pending commit after leave: {e}"))?;
+                }
+
                 None
             }
             ProcessedMessageContent::ExternalJoinProposalMessage(_external_proposal_ptr) => {
@@ -624,8 +672,26 @@ impl User {
         let mut messages_out: Vec<ConversationMessage> = Vec::new();
 
         log::debug!("update::Processing messages for {} ", self.username());
+        let mut messages = self.backend.recv_msgs(self)?;
+        messages.sort_by_key(|msg| match msg.clone().extract() {
+            MlsMessageBodyIn::PublicMessage(public_message_in) => {
+                match public_message_in.content_type() {
+                    ContentType::Application => 1u8,
+                    ContentType::Proposal => 2u8,
+                    ContentType::Commit => 3u8,
+                }
+            }
+            MlsMessageBodyIn::PrivateMessage(private_message_in) => {
+                match private_message_in.content_type() {
+                    ContentType::Application => 1u8,
+                    ContentType::Proposal => 2u8,
+                    ContentType::Commit => 3u8,
+                }
+            }
+            _ => 0u8,
+        });
         // Go through the list of messages and process or store them.
-        for message in self.backend.recv_msgs(self)?.drain(..) {
+        for message in messages.drain(..) {
             log::debug!("Reading message format {:#?} ...", message.wire_format());
             match message.extract() {
                 MlsMessageBodyIn::Welcome(welcome) => {

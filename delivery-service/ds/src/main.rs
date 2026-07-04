@@ -311,20 +311,30 @@ async fn msg_send(State(data): State<Arc<DsData>>, body: Bytes) -> Response {
     if protocol_msg.is_handshake_message() {
         let epoch = protocol_msg.epoch().as_u64();
         let group_id = protocol_msg.group_id().as_slice();
-        if let Some(&group_epoch) = groups.get(group_id) {
-            if group_epoch > epoch {
-                return StatusCode::CONFLICT.into_response();
+        let is_commit = protocol_msg.content_type() == ContentType::Commit;
+
+        match groups.get(group_id).copied() {
+            Some(group_epoch) => {
+                // Anything not targeting the epoch the DS currently has on
+                // record is stale — a genuinely old retransmit, or a second
+                // commit racing to close out an epoch someone else already
+                // closed out first.
+                if epoch != group_epoch {
+                    return StatusCode::CONFLICT.into_response();
+                }
+                if is_commit {
+                    // Accepting this commit finalizes N -> N+1. Record the
+                    // *result*, not the epoch the message itself carries.
+                    groups.insert(group_id.to_vec(), epoch + 1);
+                }
             }
-            // Update server state to the latest epoch.
-            let old_value = groups.insert(group_id.to_vec(), epoch);
-            if old_value.is_none() {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        } else {
-            // We haven't seen this group_id yet. Store it.
-            let old_value = groups.insert(group_id.to_vec(), epoch);
-            if old_value.is_some() {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            None => {
+                // Handle a commit as the very first message for a group_id
+                // the same way: store the epoch it produces, not the one it
+                // was built against, or a second same-epoch commit racing
+                // right behind it would slip through this branch too.
+                let stored_epoch = if is_commit { epoch + 1 } else { epoch };
+                groups.insert(group_id.to_vec(), stored_epoch);
             }
         }
     }
@@ -390,29 +400,33 @@ async fn msg_recv(
 
 async fn debug_dump(State(data): State<Arc<DsData>>) -> Response {
     let clients_lock = data.clients.lock();
-    let groups_lock  = data.groups.lock();
+    let groups_lock = data.groups.lock();
 
     let clients: Vec<serde_json::Value> = clients_lock
         .values()
-        .map(|c| serde_json::json!({
-            "id": bytes_to_display(&c.id),
-            "key_packages": c.key_packages.0.iter()
-                .map(|(hash, _)| hex::encode(hash.as_slice()))
-                .collect::<Vec<_>>(),
-            "reserved_kp_hashes": c.reserved_key_pkg_hash.iter()
-                .map(hex::encode)
-                .collect::<Vec<_>>(),
-            "queued_msgs": c.msgs.len(),
-            "queued_welcomes": c.welcome_queue.len(),
-        }))
+        .map(|c| {
+            serde_json::json!({
+                "id": bytes_to_display(&c.id),
+                "key_packages": c.key_packages.0.iter()
+                    .map(|(hash, _)| hex::encode(hash.as_slice()))
+                    .collect::<Vec<_>>(),
+                "reserved_kp_hashes": c.reserved_key_pkg_hash.iter()
+                    .map(hex::encode)
+                    .collect::<Vec<_>>(),
+                "queued_msgs": c.msgs.len(),
+                "queued_welcomes": c.welcome_queue.len(),
+            })
+        })
         .collect();
 
     let groups: Vec<serde_json::Value> = groups_lock
         .iter()
-        .map(|(id, epoch)| serde_json::json!({
-            "group_id": hex::encode(id),
-            "epoch": epoch,
-        }))
+        .map(|(id, epoch)| {
+            serde_json::json!({
+                "group_id": hex::encode(id),
+                "epoch": epoch,
+            })
+        })
         .collect();
 
     let dump = serde_json::json!({
@@ -444,7 +458,7 @@ fn app(data: Arc<DsData>) -> Router {
         .route("/send/message", post(msg_send))
         .route("/recv/{id}", get(msg_recv))
         .route("/reset", get(reset))
-        .route("/debug/dump",                get(debug_dump))
+        .route("/debug/dump", get(debug_dump))
         .with_state(data)
 }
 
