@@ -294,6 +294,24 @@ fn main() {
                         continue;
                     }
 
+                    // Request to leave the group.
+                    if op2 == "leave" {
+                        match client.leave(group_name.to_string()) {
+                            Ok(()) => {
+                                stdout
+                                    .write_all(
+                                        format!("Left group {group_name}\n\n")
+                                            .as_bytes(),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(e) => {
+                                println!("Error leaving group: {e}");
+                            }
+                        }
+                        continue;
+                    }
+
                     // Read messages sent to the group.
                     if op2 == "read" {
                         let messages = client.read_msgs(group_name.to_string()).unwrap();

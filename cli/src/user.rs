@@ -773,7 +773,6 @@ impl User {
         This must be done before the member invitation is locally committed.
         It avoids the invited member to receive the commit message (which is in the previous group epoch).*/
         log::trace!("Sending commit");
-        let group = groups.get_mut(&group_name).unwrap(); // XXX: not cool.
         let group_recipients = self.recipients(group);
 
         let msg = GroupMessage::new(out_messages.into(), &group_recipients);
@@ -834,7 +833,6 @@ impl User {
 
         // First, send the MlsMessage remove commit to the group.
         log::trace!("Sending commit");
-        let group = groups.get_mut(&group_name).unwrap(); // XXX: not cool.
         let group_recipients = self.recipients(group);
 
         let msg = GroupMessage::new(remove_message.into(), &group_recipients);
@@ -846,6 +844,37 @@ impl User {
             .borrow_mut()
             .merge_pending_commit(&self.provider)
             .expect("error merging pending commit");
+
+        drop(groups);
+
+        self.persist_metadata()?;
+
+        Ok(())
+    }
+
+    /// Leave the group with the given name.
+    pub(crate) fn leave(&self, group_name: String) -> Result<(), String> {
+        // Get the group ID
+
+        let mut groups = self.groups.borrow_mut();
+        let group = match groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(format!("No group with name {group_name} known.")),
+        };
+
+        // Remove operation on the mls group
+        let leave_message = group
+            .mls_group
+            .borrow_mut()
+            .leave_group(&self.provider, &self.identity.borrow().signer)
+            .map_err(|e| format!("Failed to leave group - {e}"))?;
+
+        // First, send the MlsMessage remove commit to the group.
+        log::trace!("Sending leave message");
+        let group_recipients = self.recipients(group);
+
+        let msg = GroupMessage::new(leave_message.into(), &group_recipients);
+        self.backend.send_msg(&msg)?;
 
         drop(groups);
 
