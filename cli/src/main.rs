@@ -30,15 +30,16 @@ const HELP: &str = "
 
 const GROUP_HELP: &str = "
 >>> Group submenu commands:
+>>>     - demote {client name}         demote a user from admin
 >>>     - exit                         leave the group submenu
 >>>     - help                         print this group help message
 >>>     - info                         show details for the current group
 >>>     - invite {client name}         invite a user to the group
+>>>     - promote {client name}        promote a user to admin
 >>>     - read                         read messages sent to the group
 >>>     - remove {client name}         remove a user from the group
 >>>     - send {message}               send a message to the group
 >>>     - update                       update the client state for the group
->>>     - promote {client name}        promote a user to admin
 ";
 
 fn print_help(stdout: &mut StdoutLock, help_text: &str) {
@@ -320,6 +321,24 @@ fn main() {
                         continue;
                     }
 
+                    // Demote a client from admin.
+                    if let Some(demote_client) = op2.strip_prefix("demote ") {
+                        match client.demote(demote_client.to_string(), group_name.to_string()) {
+                            Ok(()) => {
+                                stdout
+                                    .write_all(
+                                        format!("Demoted {demote_client} from admin in group {group_name}\n\n")
+                                            .as_bytes(),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(e) => {
+                                println!("Error demoting user: {e}");
+                            }
+                        }
+                        continue;
+                    }
+
                     // Request to leave the group.
                     if op2 == "leave" {
                         match client.leave(group_name.to_string()) {
@@ -563,6 +582,12 @@ fn basic_test() {
         .invite("Client4".to_string(), "MLS Discussions".to_string())
         .unwrap();
 
+    // Everyone updates.
+    client_1.update(None).unwrap();
+    client_2.update(None).unwrap();
+    client_3.update(None).unwrap();
+    client_4.update(None).unwrap();
+
     // Client 3 sends a message.
     client_3
         .send_msg(MESSAGE_3, "MLS Discussions".to_string())
@@ -572,6 +597,7 @@ fn basic_test() {
     client_1.update(None).unwrap();
     client_2.update(None).unwrap();
     client_3.update(None).unwrap();
+    client_4.update(None).unwrap();
 
     // Check that Client 1 and Client 2 received the message
     assert_eq!(
@@ -588,4 +614,33 @@ fn basic_test() {
             conversation::ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
         ])
     );
+
+    // 1. Client 2 (admin) tries to demote Client 1 (admin) -> Should succeed.
+    client_2
+        .demote("Client1".to_string(), "MLS Discussions".to_string())
+        .unwrap();
+
+    // Everyone syncs the new epoch
+    client_1.update(None).unwrap();
+    client_2.update(None).unwrap();
+    client_3.update(None).unwrap();
+    client_4.update(None).unwrap();
+
+    // 2. Double-check that Client 1 is actually demoted:
+    // Client 1 (now non-admin) tries to promote Client 3 -> Should fail.
+    assert!(client_1
+        .promote("Client3".to_string(), "MLS Discussions".to_string())
+        .is_err());
+
+    // 3. Check both-side admin validation:
+    // Client 2 (admin) tries to demote Client 3 (already a non-admin) -> Should fail.
+    assert!(client_2
+        .demote("Client3".to_string(), "MLS Discussions".to_string())
+        .is_err());
+
+    // 4. Test safety guard:
+    // Client 2 tries to demote themselves (Client 2 is the last remaining admin) -> Should fail.
+    assert!(client_2
+        .demote("Client2".to_string(), "MLS Discussions".to_string())
+        .is_err());
 }

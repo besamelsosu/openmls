@@ -1040,6 +1040,94 @@ impl User {
         Ok(())
     }
 
+    /// Demote user with the given name from admin in the group.
+    pub fn demote(&mut self, name: String, group_name: String) -> Result<(), String> {
+        let mut groups = self.groups.borrow_mut();
+        let group = match groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(format!("No group with name {group_name} known.")),
+        };
+
+        // Check authorization: Ensure the sender is an admin
+        {
+            let mls_group = group.mls_group.borrow();
+            let self_credential = &self.identity.borrow().credential_with_key.credential;
+            check_credential_is_admin(mls_group.extensions(), self_credential)
+                .map_err(|e| format!("Authorization error: {e}"))?;
+        }
+
+        // Get the target client leaf index
+        let leaf_index = self.find_member_index(name.clone(), group)?;
+
+        let target_credential = {
+            let mls_group = group.mls_group.borrow();
+            mls_group
+                .member(leaf_index)
+                .cloned()
+                .ok_or_else(|| format!("Could not find member credential for {name}"))?
+        };
+
+        let mut extensions = group.mls_group.borrow().extensions().clone();
+        let mut admin_list = None;
+        for ext in extensions.iter() {
+            if let Ok(list) = AdminListExtension::from_extension(ext) {
+                admin_list = Some(list);
+                break;
+            }
+        }
+
+        let mut admin_list = admin_list
+            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+
+        // Check target authorization: Ensure the target is actually an admin
+        let position = admin_list
+            .admins
+            .iter()
+            .position(|cred| cred == &target_credential)
+            .ok_or_else(|| format!("{name} is not an admin of group {group_name}"))?;
+
+        // Optional safety guard: prevents leaving the group with 0 admins
+        if admin_list.admins.len() <= 1 {
+            return Err("Cannot demote the last admin of the group".to_string());
+        }
+
+        // Remove the target admin credential
+        admin_list.admins.remove(position);
+
+        let new_ext = admin_list.to_extension().map_err(|e| e.to_string())?;
+        extensions
+            .add_or_replace(new_ext)
+            .map_err(|e| e.to_string())?;
+
+        let (commit, _welcome, _group_info) = group
+            .mls_group
+            .borrow_mut()
+            .update_group_context_extensions(
+                &self.provider,
+                extensions,
+                &self.identity.borrow().signer,
+            )
+            .map_err(|e| format!("Failed to update group context extensions - {e}"))?;
+
+        // Send the commit to the group
+        let group_recipients = self.recipients(group);
+        let msg = GroupMessage::new(commit.into(), &group_recipients);
+        self.backend.send_msg(&msg)?;
+
+        // Process the staged commit on our end
+        group
+            .mls_group
+            .borrow_mut()
+            .merge_pending_commit(&self.provider)
+            .expect("error merging pending commit");
+
+        drop(groups);
+
+        self.persist_metadata()?;
+
+        Ok(())
+    }
+
     /// Leave the group with the given name.
     pub(crate) fn leave(&self, group_name: String) -> Result<(), String> {
         // Get the group ID
