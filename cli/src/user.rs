@@ -317,6 +317,31 @@ impl User {
         Ok(member_names)
     }
 
+    pub fn group_admin_names(&self, group_name: &str) -> Result<Vec<String>, String> {
+        let group = self.group(group_name)?;
+        let mls_group = group.mls_group.borrow();
+        let extensions = mls_group.extensions();
+
+        let mut admin_list = None;
+        for ext in extensions.iter() {
+            if let Ok(list) = AdminListExtension::from_extension(ext) {
+                admin_list = Some(list);
+                break;
+            }
+        }
+
+        let admin_list = admin_list
+            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+
+        let mut admin_names = Vec::new();
+        for admin_cred in &admin_list.admins {
+            let basic_cred = BasicCredential::try_from(admin_cred.clone()).unwrap();
+            admin_names.push(String::from_utf8(basic_cred.identity().to_vec()).unwrap());
+        }
+        admin_names.sort();
+        Ok(admin_names)
+    }
+
     pub fn group_message_count(&self, group_name: &str) -> Result<usize, String> {
         let group = self.group(group_name)?;
         Ok(group
@@ -618,7 +643,10 @@ impl User {
             }
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
                 let has_add_or_remove = commit_ptr.add_proposals().next().is_some()
-                    || commit_ptr.remove_proposals().next().is_some();
+                    || commit_ptr.remove_proposals().next().is_some()
+                    || commit_ptr
+                        .queued_proposals()
+                        .any(|p| matches!(p.proposal(), Proposal::GroupContextExtensions(_)));
                 if has_add_or_remove {
                     check_credential_is_admin(
                         mls_group.extensions(),
@@ -761,8 +789,17 @@ impl User {
         let admin_ext = crate::admin_list_gce::AdminListExtension::new(vec![creator_credential]);
         let openmls_ext = admin_ext.to_extension().map_err(|e| e.to_string())?;
 
-        let extensions = openmls::extensions::Extensions::single(openmls_ext)
-            .map_err(|e| format!("Invalid extension configuration: {:?}", e))?;
+        let required_capabilities = openmls::extensions::RequiredCapabilitiesExtension::new(
+            &[ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)],
+            &[],
+            &[],
+        );
+        let req_cap_ext =
+            openmls::extensions::Extension::RequiredCapabilities(required_capabilities);
+
+        let mut extensions = openmls::extensions::Extensions::default();
+        extensions.add(openmls_ext).map_err(|e| e.to_string())?;
+        extensions.add(req_cap_ext).map_err(|e| e.to_string())?;
 
         let capabilities = Capabilities::builder()
             .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
@@ -911,6 +948,85 @@ impl User {
         self.backend.send_msg(&msg)?;
 
         // Second, process the removal on our end.
+        group
+            .mls_group
+            .borrow_mut()
+            .merge_pending_commit(&self.provider)
+            .expect("error merging pending commit");
+
+        drop(groups);
+
+        self.persist_metadata()?;
+
+        Ok(())
+    }
+
+    /// Promote user with the given name to admin in the group.
+    pub fn promote(&mut self, name: String, group_name: String) -> Result<(), String> {
+        let mut groups = self.groups.borrow_mut();
+        let group = match groups.get_mut(&group_name) {
+            Some(g) => g,
+            None => return Err(format!("No group with name {group_name} known.")),
+        };
+
+        // Check authorization
+        {
+            let mls_group = group.mls_group.borrow();
+            let self_credential = &self.identity.borrow().credential_with_key.credential;
+            check_credential_is_admin(mls_group.extensions(), self_credential)
+                .map_err(|e| format!("Authorization error: {e}"))?;
+        }
+
+        // Get the client leaf index
+        let leaf_index = self.find_member_index(name.clone(), group)?;
+
+        let target_credential = {
+            let mls_group = group.mls_group.borrow();
+            mls_group
+                .member(leaf_index)
+                .cloned()
+                .ok_or_else(|| format!("Could not find member credential for {name}"))?
+        };
+
+        let mut extensions = group.mls_group.borrow().extensions().clone();
+        let mut admin_list = None;
+        for ext in extensions.iter() {
+            if let Ok(list) = AdminListExtension::from_extension(ext) {
+                admin_list = Some(list);
+                break;
+            }
+        }
+
+        let mut admin_list = admin_list
+            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+
+        if admin_list.admins.contains(&target_credential) {
+            return Err(format!("{name} is already an admin of group {group_name}"));
+        }
+
+        admin_list.admins.push(target_credential);
+
+        let new_ext = admin_list.to_extension().map_err(|e| e.to_string())?;
+        extensions
+            .add_or_replace(new_ext)
+            .map_err(|e| e.to_string())?;
+
+        let (commit, _welcome, _group_info) = group
+            .mls_group
+            .borrow_mut()
+            .update_group_context_extensions(
+                &self.provider,
+                extensions,
+                &self.identity.borrow().signer,
+            )
+            .map_err(|e| format!("Failed to update group context extensions - {e}"))?;
+
+        // Send the commit to the group
+        let group_recipients = self.recipients(group);
+        let msg = GroupMessage::new(commit.into(), &group_recipients);
+        self.backend.send_msg(&msg)?;
+
+        // Process the staged commit on our end
         group
             .mls_group
             .borrow_mut()

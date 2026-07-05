@@ -38,6 +38,7 @@ const GROUP_HELP: &str = "
 >>>     - remove {client name}         remove a user from the group
 >>>     - send {message}               send a message to the group
 >>>     - update                       update the client state for the group
+>>>     - promote {client name}        promote a user to admin
 ";
 
 fn print_help(stdout: &mut StdoutLock, help_text: &str) {
@@ -90,6 +91,7 @@ fn print_group_info(stdout: &mut StdoutLock, client: &user::User, group_name: &s
     match client.group_member_names(group_name) {
         Ok(member_names) => {
             let message_count = client.group_message_count(group_name).unwrap_or(0);
+            let admin_names = client.group_admin_names(group_name).unwrap_or_default();
 
             stdout.write_all(b" >>> Group info:\n").unwrap();
             stdout
@@ -100,6 +102,12 @@ fn print_group_info(stdout: &mut StdoutLock, client: &user::User, group_name: &s
                 .unwrap();
             stdout
                 .write_all(format!("     Member names: {member_names:?}\n").as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Admins: {}\n", admin_names.len()).as_bytes())
+                .unwrap();
+            stdout
+                .write_all(format!("     Admin names: {admin_names:?}\n").as_bytes())
                 .unwrap();
             stdout
                 .write_all(format!("     Messages stored locally: {message_count}\n\n").as_bytes())
@@ -294,15 +302,30 @@ fn main() {
                         continue;
                     }
 
+                    // Promote a client to admin.
+                    if let Some(promote_client) = op2.strip_prefix("promote ") {
+                        match client.promote(promote_client.to_string(), group_name.to_string()) {
+                            Ok(()) => {
+                                stdout
+                                    .write_all(
+                                        format!("Promoted {promote_client} to admin in group {group_name}\n\n")
+                                            .as_bytes(),
+                                    )
+                                    .unwrap();
+                            }
+                            Err(e) => {
+                                println!("Error promoting user: {e}");
+                            }
+                        }
+                        continue;
+                    }
+
                     // Request to leave the group.
                     if op2 == "leave" {
                         match client.leave(group_name.to_string()) {
                             Ok(()) => {
                                 stdout
-                                    .write_all(
-                                        format!("Left group {group_name}\n\n")
-                                            .as_bytes(),
-                                    )
+                                    .write_all(format!("Left group {group_name}\n\n").as_bytes())
                                     .unwrap();
                             }
                             Err(e) => {
@@ -511,6 +534,34 @@ fn basic_test() {
             "Client1".to_owned(),
         )])
     );
+
+    // Client 2 (non-admin) tries to promote Client 3 (should fail).
+    assert!(client_2
+        .promote("Client3".to_string(), "MLS Discussions".to_string())
+        .is_err());
+
+    // Client 1 (admin) promotes Client 2 (should succeed).
+    client_1
+        .promote("Client2".to_string(), "MLS Discussions".to_string())
+        .unwrap();
+
+    // Everyone updates.
+    client_1.update(None).unwrap();
+    client_2.update(None).unwrap();
+    client_3.update(None).unwrap();
+
+    // Create client 4 to verify client 2 can now invite new members
+    let mut client_4 = user::User::new("Client4".to_string()).unwrap();
+    client_4.add_key_package();
+    client_4.add_key_package();
+    client_4.register().unwrap();
+
+    client_2.update(None).unwrap();
+
+    // Client 2 (now admin) adds Client 4 (should succeed).
+    client_2
+        .invite("Client4".to_string(), "MLS Discussions".to_string())
+        .unwrap();
 
     // Client 3 sends a message.
     client_3
