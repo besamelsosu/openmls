@@ -2,8 +2,10 @@
 // extern crate clap;
 // use clap::App;
 
-use std::io::{stdin, stdout, StdoutLock, Write};
-use termion::input::TermRead;
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+use std::env;
+use std::io::{stdout, Write};
 
 mod admin_list_gce;
 mod backend;
@@ -15,38 +17,38 @@ mod serialize_any_hashmap;
 mod user;
 
 const HELP: &str = "
->>> Available commands:
->>>     - create group {group name}    create a new group
->>>     - create kp                    create a new key package
->>>     - exit                         exit the CLI
->>>     - group {group name}           enter group submenu for operations
->>>     - help                         print this help message
->>>     - info                         show current user details
->>>     - load {client name}           load the client state as a new client
->>>     - register {client name}       register a new client
->>>     - reset                        reset the server
->>>     - update                       update the client state
+ >>> Available commands:
+ >>>     - create group {group name}    create a new group
+ >>>     - create kp                    create a new key package
+ >>>     - exit                         exit the CLI
+ >>>     - group {group name}           enter group submenu for operations
+ >>>     - help                         print this help message
+ >>>     - info                         show current user details
+ >>>     - load {client name}           load the client state as a new client
+ >>>     - register {client name}       register a new client
+ >>>     - reset                        reset the server
+ >>>     - update                       update the client state
 ";
 
 const GROUP_HELP: &str = "
->>> Group submenu commands:
->>>     - demote {client name}         demote a user from admin
->>>     - exit                         leave the group submenu
->>>     - help                         print this group help message
->>>     - info                         show details for the current group
->>>     - invite {client name}         invite a user to the group
->>>     - promote {client name}        promote a user to admin
->>>     - read                         read messages sent to the group
->>>     - remove {client name}         remove a user from the group
->>>     - send {message}               send a message to the group
->>>     - update                       update the client state for the group
+ >>> Group submenu commands:
+ >>>     - demote {client name}         demote a user from admin
+ >>>     - exit                         leave the group submenu
+ >>>     - help                         print this group help message
+ >>>     - info                         show details for the current group
+ >>>     - invite {client name}         invite a user to the group
+ >>>     - promote {client name}        promote a user to admin
+ >>>     - read                         read messages sent to the group
+ >>>     - remove {client name}         remove a user from the group
+ >>>     - send {message}               send a message to the group
+ >>>     - update                       update the client state for the group
 ";
 
-fn print_help(stdout: &mut StdoutLock, help_text: &str) {
-    stdout.write_all(help_text.as_bytes()).unwrap();
+fn print_help(help_text: &str) {
+    print!("{help_text}");
 }
 
-fn print_user_info(stdout: &mut StdoutLock, client: &Option<user::User>) {
+fn print_user_info(client: &Option<user::User>) {
     match client {
         Some(client) => {
             let username = client.username();
@@ -56,84 +58,50 @@ fn print_user_info(stdout: &mut StdoutLock, client: &Option<user::User>) {
             let contact_count = contact_names.len();
             let kp_count = client.key_packages().len();
 
-            stdout.write_all(b" >>> User info:\n").unwrap();
-            stdout
-                .write_all(format!("     Username: {username}\n").as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Groups: {group_count}\n").as_bytes())
-                .unwrap();
-            if group_count > 0 {
-                stdout
-                    .write_all(format!("     Group names: {group_names:?}\n").as_bytes())
-                    .unwrap();
-            }
-            stdout
-                .write_all(format!("     Known contacts: {contact_count}\n").as_bytes())
-                .unwrap();
-            if contact_count > 0 {
-                stdout
-                    .write_all(format!("     Contact names: {contact_names:?}\n").as_bytes())
-                    .unwrap();
-            }
-            stdout
-                .write_all(format!("     Key packages: {kp_count}\n\n").as_bytes())
-                .unwrap();
+            println!(" >>> User info:");
+            println!("     Username: {username}");
+            println!("     Groups: {group_count}");
+            println!("     Group names: {group_names:?}");
+            println!("     Known contacts: {contact_count}");
+            println!("     Contact names: {contact_names:?}");
+            println!("     Key packages: {kp_count}");
         }
         None => {
-            stdout
-                .write_all(b" >>> No user registered or loaded.\n\n")
-                .unwrap();
+            println!(" >>> No user registered or loaded.");
         }
     }
 }
 
-fn print_group_info(stdout: &mut StdoutLock, client: &user::User, group_name: &str) {
+fn print_group_info(client: &user::User, group_name: &str) {
     match client.group_member_names(group_name) {
         Ok(member_names) => {
             let message_count = client.group_message_count(group_name).unwrap_or(0);
             let admin_names = client.group_admin_names(group_name).unwrap_or_default();
 
-            stdout.write_all(b" >>> Group info:\n").unwrap();
-            stdout
-                .write_all(format!("     Group: {group_name}\n").as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Members: {}\n", member_names.len()).as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Member names: {member_names:?}\n").as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Admins: {}\n", admin_names.len()).as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Admin names: {admin_names:?}\n").as_bytes())
-                .unwrap();
-            stdout
-                .write_all(format!("     Messages stored locally: {message_count}\n\n").as_bytes())
-                .unwrap();
+            println!(" >>> Group info:");
+            println!("     Group: {group_name}");
+            println!("     Members: {}", member_names.len());
+            println!("     Member names: {member_names:?}");
+            println!("     Admins: {}", admin_names.len());
+            println!("     Admin names: {admin_names:?}");
+            println!("     Messages stored locally: {message_count}");
         }
         Err(e) => {
-            stdout
-                .write_all(format!(" >>> {e}\n\n").as_bytes())
-                .unwrap();
+            eprintln!(" >>> {e}");
         }
     }
 }
 
-fn update(client: &mut user::User, group_id: Option<String>, stdout: &mut StdoutLock) {
+fn update(client: &mut user::User, group_id: Option<String>) {
     let messages = client.update(group_id).unwrap();
-    stdout.write_all(b" >>> Updated client :)\n").unwrap();
+    println!(" >>> Updated client :)");
     if !messages.is_empty() {
-        stdout.write_all(b"     New messages:\n\n").unwrap();
+        println!("     New messages:");
     }
     messages.iter().for_each(|cm| {
-        stdout
-            .write_all(format!("         {0} from {1}\n", cm.message, cm.author).as_bytes())
-            .unwrap();
+        println!("         {0} from {1}", cm.message, cm.author);
     });
-    stdout.write_all(b"\n").unwrap();
+    println!();
 }
 
 fn main() {
@@ -141,17 +109,42 @@ fn main() {
 
     let stdout = stdout();
     let mut stdout = stdout.lock();
-    let stdin = stdin();
-    let mut stdin = stdin.lock();
+    let mut rl = DefaultEditor::new().unwrap();
+    let history_path = env::temp_dir().join("openmls").join(".openmls_history.txt");
+    let _ = rl.load_history(&history_path);
 
-    stdout
-        .write_all(b" >>> Welcome to the OpenMLS CLI :)\nType help to get a list of commands\n\n")
-        .unwrap();
+    println!(" >>> Welcome to the OpenMLS CLI :)\n >>> Type help to get a list of commands");
     let mut client = None;
 
     loop {
         stdout.flush().unwrap();
-        let op = stdin.read_line().unwrap().unwrap();
+
+        let op = match rl.readline(">>> ") {
+            Ok(line) => {
+                let line = line.trim().to_owned();
+
+                if !line.is_empty() {
+                    let _ = rl.add_history_entry(line.as_str());
+                }
+
+                line
+            }
+
+            Err(ReadlineError::Interrupted) => {
+                continue;
+            }
+
+            Err(ReadlineError::Eof) => {
+                let _ = rl.save_history(&history_path);
+                println!("\n >>> Goodbye!");
+                break;
+            }
+
+            Err(err) => {
+                eprintln!("readline error: {err}");
+                break;
+            }
+        };
 
         // Register a client.
         // There's no persistence. So once the client app stops you have to
@@ -163,29 +156,16 @@ fn main() {
                     user.add_key_package();
                     match user.register() {
                         Ok(()) => {
-                            stdout
-                                .write_all(
-                                    format!("registered new client {client_name}\n\n").as_bytes(),
-                                )
-                                .unwrap();
+                            println!("registered new client {client_name}");
                             client = Some(user);
                         }
                         Err(e) => {
-                            stdout
-                                .write_all(
-                                    format!("Error registering client {client_name} : {e}\n\n")
-                                        .as_bytes(),
-                                )
-                                .unwrap();
+                            eprintln!("Error registering client {client_name} : {e}");
                         }
                     }
                 }
                 Err(e) => {
-                    stdout
-                        .write_all(
-                            format!("Error creating client {client_name} : {e}\n\n").as_bytes(),
-                        )
-                        .unwrap();
+                    eprintln!("Error creating client {client_name} : {e}");
                 }
             }
             continue;
@@ -195,15 +175,9 @@ fn main() {
             match user::User::load(client_name.to_string()) {
                 Ok(user) => {
                     client = Some(user);
-                    stdout
-                        .write_all(format!("recovered client {client_name}\n\n").as_bytes())
-                        .unwrap();
+                    println!("recovered client {client_name}");
                 }
-                Err(e) => stdout
-                    .write_all(
-                        format!("Error recovering client {client_name} : {e}\n\n").as_bytes(),
-                    )
-                    .unwrap(),
+                Err(e) => eprintln!("Error recovering client {client_name} : {e}"),
             }
             continue;
         }
@@ -212,13 +186,9 @@ fn main() {
         if op == "create kp" {
             if let Some(client) = &mut client {
                 client.create_kp();
-                stdout
-                    .write_all(b" >>> New key package created\n\n")
-                    .unwrap();
+                println!(" >>> New key package created");
             } else {
-                stdout
-                    .write_all(b" >>> No client to update :(\n\n")
-                    .unwrap();
+                println!(" >>> No client to update :(");
             }
             continue;
         }
@@ -228,22 +198,14 @@ fn main() {
             if let Some(client) = &mut client {
                 match client.create_group(group_name.to_string()) {
                     Ok(()) => {
-                        stdout
-                            .write_all(format!(" >>> Created group {group_name} :)\n\n").as_bytes())
-                            .unwrap();
+                        println!(" >>> Created group {group_name} :)");
                     }
                     Err(e) => {
-                        stdout
-                            .write_all(
-                                format!("Error creating group {group_name} : {e}\n\n").as_bytes(),
-                            )
-                            .unwrap();
+                        println!("Error creating group {group_name} : {e}");
                     }
                 }
             } else {
-                stdout
-                    .write_all(b" >>> No client to create a group :(\n\n")
-                    .unwrap();
+                println!(" >>> No client to create a group :(");
             }
             continue;
         }
@@ -252,17 +214,37 @@ fn main() {
         if let Some(group_name) = op.strip_prefix("group ") {
             if let Some(client) = &mut client {
                 loop {
-                    stdout.write_all(b" > ").unwrap();
-                    stdout.flush().unwrap();
-                    let op2 = stdin.read_line().unwrap().unwrap();
+                    let op2 = match rl.readline("{group_name} >>> ") {
+                        Ok(line) => {
+                            let line = line.trim().to_owned();
+
+                            if !line.is_empty() {
+                                let _ = rl.add_history_entry(line.as_str());
+                            }
+
+                            line
+                        }
+
+                        Err(ReadlineError::Interrupted) => {
+                            continue;
+                        }
+
+                        Err(ReadlineError::Eof) => {
+                            println!(">>> Leaving group");
+                            break;
+                        }
+
+                        Err(err) => {
+                            eprintln!("readline error: {err}");
+                            break;
+                        }
+                    };
 
                     // Send a message to the group.
                     if let Some(msg) = op2.strip_prefix("send ") {
                         match client.send_msg(msg, group_name.to_string()) {
-                            Ok(()) => stdout
-                                .write_all(format!("sent message to {group_name}\n\n").as_bytes())
-                                .unwrap(),
-                            Err(e) => println!("Error sending group message: {e:?}"),
+                            Ok(()) => println!("sent message to {group_name}"),
+                            Err(e) => eprintln!("Error sending group message: {e:?}"),
                         }
                         continue;
                     }
@@ -271,15 +253,10 @@ fn main() {
                     if let Some(new_client) = op2.strip_prefix("invite ") {
                         match client.invite(new_client.to_string(), group_name.to_string()) {
                             Ok(()) => {
-                                stdout
-                                    .write_all(
-                                        format!("added {new_client} to group {group_name}\n\n")
-                                            .as_bytes(),
-                                    )
-                                    .unwrap();
+                                println!("added {new_client} to group {group_name}");
                             }
                             Err(e) => {
-                                println!("Error inviting user: {e}");
+                                eprintln!("Error inviting user: {e}");
                             }
                         }
                         continue;
@@ -289,15 +266,10 @@ fn main() {
                     if let Some(rem_client) = op2.strip_prefix("remove ") {
                         match client.remove(rem_client.to_string(), group_name.to_string()) {
                             Ok(()) => {
-                                stdout
-                                    .write_all(
-                                        format!("Removed {rem_client} from group {group_name}\n\n")
-                                            .as_bytes(),
-                                    )
-                                    .unwrap();
+                                println!("Removed {rem_client} from group {group_name}");
                             }
                             Err(e) => {
-                                println!("Error removing user: {e}");
+                                eprintln!("Error removing user: {e}");
                             }
                         }
                         continue;
@@ -307,15 +279,12 @@ fn main() {
                     if let Some(promote_client) = op2.strip_prefix("promote ") {
                         match client.promote(promote_client.to_string(), group_name.to_string()) {
                             Ok(()) => {
-                                stdout
-                                    .write_all(
-                                        format!("Promoted {promote_client} to admin in group {group_name}\n\n")
-                                            .as_bytes(),
-                                    )
-                                    .unwrap();
+                                println!(
+                                    "Promoted {promote_client} to admin in group {group_name}"
+                                );
                             }
                             Err(e) => {
-                                println!("Error promoting user: {e}");
+                                eprintln!("Error promoting user: {e}");
                             }
                         }
                         continue;
@@ -325,15 +294,12 @@ fn main() {
                     if let Some(demote_client) = op2.strip_prefix("demote ") {
                         match client.demote(demote_client.to_string(), group_name.to_string()) {
                             Ok(()) => {
-                                stdout
-                                    .write_all(
-                                        format!("Demoted {demote_client} from admin in group {group_name}\n\n")
-                                            .as_bytes(),
-                                    )
-                                    .unwrap();
+                                println!(
+                                    "Demoted {demote_client} from admin in group {group_name}"
+                                );
                             }
                             Err(e) => {
-                                println!("Error demoting user: {e}");
+                                eprintln!("Error demoting user: {e}");
                             }
                         }
                         continue;
@@ -343,12 +309,10 @@ fn main() {
                     if op2 == "leave" {
                         match client.leave(group_name.to_string()) {
                             Ok(()) => {
-                                stdout
-                                    .write_all(format!("Left group {group_name}\n\n").as_bytes())
-                                    .unwrap();
+                                println!("Left group {group_name}");
                             }
                             Err(e) => {
-                                println!("Error leaving group: {e}");
+                                eprintln!("Error leaving group: {e}");
                             }
                         }
                         continue;
@@ -358,69 +322,54 @@ fn main() {
                     if op2 == "read" {
                         let messages = client.read_msgs(group_name.to_string()).unwrap();
                         if let Some(messages) = messages {
-                            stdout
-                                .write_all(
-                                    format!(
-                                        "{} has received {} messages\n\n",
-                                        group_name,
-                                        messages.len()
-                                    )
-                                    .as_bytes(),
-                                )
-                                .unwrap();
+                            println!("{} has received {} messages", group_name, messages.len());
                         } else {
-                            stdout
-                                .write_all(format!("{group_name} has no messages\n\n").as_bytes())
-                                .unwrap();
+                            println!("{group_name} has no messages");
                         }
                         continue;
                     }
 
                     if op2 == "help" {
-                        print_help(&mut stdout, GROUP_HELP);
+                        print_help(&GROUP_HELP);
                         continue;
                     }
 
                     if op2 == "info" {
-                        print_group_info(&mut stdout, client, &group_name);
+                        print_group_info(client, &group_name);
                         continue;
                     }
 
                     // Update the client state.
                     if op2 == "update" {
-                        update(client, Some(group_name.to_string()), &mut stdout);
+                        update(client, Some(group_name.to_string()));
                         continue;
                     }
 
                     // Exit group.
                     if op2 == "exit" {
-                        stdout.write_all(b" >>> Leaving group \n\n").unwrap();
+                        println!(" >>> Leaving group");
                         break;
                     }
 
-                    stdout
-                        .write_all(b" >>> Unknown group command :(\n\n")
-                        .unwrap();
+                    println!(" >>> Unknown group command :(");
                 }
             } else {
-                stdout.write_all(b" >>> No client :(\n\n").unwrap();
+                println!(" >>> No client :(");
             }
             continue;
         }
 
         if op == "info" {
-            print_user_info(&mut stdout, &client);
+            print_user_info(&client);
             continue;
         }
 
         // Update the client state.
         if op == "update" {
             if let Some(client) = &mut client {
-                update(client, None, &mut stdout);
+                update(client, None);
             } else {
-                stdout
-                    .write_all(b" >>> No client to update :(\n\n")
-                    .unwrap();
+                println!(" >>> No client to update :(");
             }
             continue;
         }
@@ -429,24 +378,23 @@ fn main() {
         if op == "reset" {
             backend::Backend::default().reset_server();
             client = None;
-            stdout.write_all(b" >>> Reset server :)\n\n").unwrap();
+            println!(" >>> Reset server :)");
             continue;
         }
 
         if op == "exit" {
-            stdout.write_all(b" >>> Goodbye!\n\n").unwrap();
+            let _ = rl.save_history(&history_path);
+            println!(" >>> Goodbye!");
             break;
         }
 
         // Print help
         if op == "help" {
-            print_help(&mut stdout, HELP);
+            print_help(HELP);
             continue;
         }
 
-        stdout
-            .write_all(b" >>> unknown command :(\n >>> try help\n\n")
-            .unwrap();
+        println!(" >>> unknown command :(\n >>> try help");
     }
 }
 
