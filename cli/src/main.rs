@@ -37,6 +37,7 @@ const GROUP_HELP: &str = "
  >>>     - help                         print this group help message
  >>>     - info                         show details for the current group
  >>>     - invite {client name}         invite a user to the group
+ >>>     - leave                        leave the group
  >>>     - promote {client name}        promote a user to admin
  >>>     - read                         read messages sent to the group
  >>>     - remove {client name}         remove a user from the group
@@ -101,7 +102,6 @@ fn update(client: &mut user::User, group_id: Option<String>) {
     messages.iter().for_each(|cm| {
         println!("         {0} from {1}", cm.message, cm.author);
     });
-    println!();
 }
 
 fn main() {
@@ -213,8 +213,9 @@ fn main() {
         // Group operations.
         if let Some(group_name) = op.strip_prefix("group ") {
             if let Some(client) = &mut client {
+                let prompt = format!("{group_name} >>> ");
                 loop {
-                    let op2 = match rl.readline("{group_name} >>> ") {
+                    let op2 = match rl.readline(&prompt) {
                         Ok(line) => {
                             let line = line.trim().to_owned();
 

@@ -24,12 +24,12 @@ impl AdminListExtension {
     pub fn to_extension(&self) -> Result<Extension, tls_codec::Error> {
         let mut extension_data = Vec::new();
         self.tls_serialize(&mut extension_data)?;
-        
-        // FIX: Pass the raw `Vec<u8>` directly into `UnknownExtension`. 
+
+        // FIX: Pass the raw `Vec<u8>` directly into `UnknownExtension`.
         // No intermediate `VLBytes` casting required!
         Ok(Extension::Unknown(
-            ADMIN_LIST_EXT_TYPE, 
-            UnknownExtension(extension_data)
+            ADMIN_LIST_EXT_TYPE,
+            UnknownExtension(extension_data),
         ))
     }
 
@@ -38,7 +38,7 @@ impl AdminListExtension {
         match extension {
             Extension::Unknown(ext_type, unknown_ext) => {
                 if *ext_type == ADMIN_LIST_EXT_TYPE {
-                    // Since `unknown_ext.0` is a raw `Vec<u8>`, `.as_slice()` 
+                    // Since `unknown_ext.0` is a raw `Vec<u8>`, `.as_slice()`
                     // cleanly gives us the `&[u8]` required for the deserializer.
                     let mut slice = unknown_ext.0.as_slice();
                     Self::tls_deserialize(&mut slice)
