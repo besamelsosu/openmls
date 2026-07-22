@@ -586,9 +586,7 @@ impl User {
                 }
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
-                // Only auto-stage/commit/merge a Remove proposal when the sender
-                // *is* the member being removed (i.e. a genuine self-removal/leave,
-                // not a removal of someone else).
+                // Detect a self-remove (leave): sender leaf index == removed leaf index.
                 let is_self_remove = match proposal_ptr.proposal() {
                     Proposal::Remove(remove_proposal) => match proposal_ptr.sender() {
                         Sender::Member(sender_leaf_index) => {
@@ -599,40 +597,74 @@ impl User {
                     _ => false,
                 };
 
-                if is_self_remove {
-                    // Stage the proposal so commit_to_pending_proposals picks it up.
-                    mls_group
-                        .store_pending_proposal(self.provider.storage(), *proposal_ptr)
-                        .map_err(|e| format!("Error storing pending proposal: {e}"))?;
+                if !is_self_remove {
+                    return Ok((PostUpdateActions::None, None, None));
+                }
 
-                    // Drop mls_group borrow_mut before re-borrowing inside commit block
-                    // and before calling recipients() (which borrows immutably).
-                    drop(mls_group);
+                // Stage the proposal so commit_to_pending_proposals picks it up.
+                mls_group
+                    .store_pending_proposal(self.provider.storage(), *proposal_ptr)
+                    .map_err(|e| format!("Error storing pending proposal: {e}"))?;
 
-                    let commit_msg = {
-                        let identity = self.identity.borrow();
-                        match group
-                            .mls_group
-                            .borrow_mut()
-                            .commit_to_pending_proposals(&self.provider, &identity.signer)
-                        {
-                            Ok((commit, _welcome, _group_info)) => commit,
-                            Err(e) => {
-                                log::error!("Error committing to pending proposals: {e:?}");
-                                return Err(e.to_string());
-                            }
+                // Any admin receiving a leave proposal attempts to commit it ("show must go on").
+                // If another admin's commit reaches the DS first, the DS rejects this send
+                // (e.g. 409 conflict). We then clear our local pending commit so we can process
+                // the winning commit when it arrives in the message queue.
+                let self_is_admin = {
+                    let self_credential = &self.identity.borrow().credential_with_key.credential;
+                    check_credential_is_admin(mls_group.extensions(), self_credential).is_ok()
+                };
+
+                if self_is_admin {
+                    log::debug!(
+                        "update::leave proposal in group {}; admin {} is attempting to commit",
+                        group.group_name,
+                        self.username(),
+                    );
+
+                    let commit_msg = match mls_group
+                        .commit_to_pending_proposals(&self.provider, &self.identity.borrow().signer)
+                    {
+                        Ok((commit, _welcome, _group_info)) => commit,
+                        Err(e) => {
+                            log::error!("Error committing to pending proposals: {e:?}");
+                            return Err(e.to_string());
                         }
                     };
 
-                    let group_recipients = self.recipients(group);
-                    let msg = GroupMessage::new(commit_msg.into(), &group_recipients);
-                    self.backend.send_msg(&msg)?;
+                    // Drop borrow_mut so recipients() can borrow immutably.
+                    drop(mls_group);
 
-                    group
-                        .mls_group
-                        .borrow_mut()
-                        .merge_pending_commit(&self.provider)
-                        .map_err(|e| format!("Error merging pending commit after leave: {e}"))?;
+                    let recipients = self.recipients(group);
+                    let msg = GroupMessage::new(commit_msg.into(), &recipients);
+
+                    match self.backend.send_msg(&msg) {
+                        Ok(()) => {
+                            log::debug!(
+                                "update::leave commit sent successfully by admin {}",
+                                self.username()
+                            );
+                            group
+                                .mls_group
+                                .borrow_mut()
+                                .merge_pending_commit(&self.provider)
+                                .map_err(|e| {
+                                    format!("Error merging pending commit after leave: {e}")
+                                })?;
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "update::Failed to send leave commit (another commit may have won): {e}. Clearing local pending commit."
+                            );
+                            if let Err(clear_err) = group
+                                .mls_group
+                                .borrow_mut()
+                                .clear_pending_commit(self.provider.storage())
+                            {
+                                log::error!("Error clearing pending commit: {clear_err:?}");
+                            }
+                        }
+                    }
                 }
 
                 None
@@ -667,6 +699,9 @@ impl User {
                                 self.username(),
                                 group.group_name
                             );
+                            if let Err(e) = mls_group.clear_pending_proposals(self.provider.storage()) {
+                                log::error!("Error clearing pending proposals on self-removal: {e:?}");
+                            }
                             return Ok((
                                 PostUpdateActions::Remove,
                                 Some(mls_group.group_id().clone()),
