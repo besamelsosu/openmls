@@ -84,6 +84,17 @@ fn check_credential_is_admin(
     }
 }
 
+fn get_admins_from_extensions(
+    extensions: &Extensions<GroupContext>,
+) -> Result<Vec<Credential>, String> {
+    for ext in extensions.iter() {
+        if let Ok(admin_list) = AdminListExtension::from_extension(ext) {
+            return Ok(admin_list.admins);
+        }
+    }
+    Err("Group context extension for admin list is missing".to_string())
+}
+
 impl User {
     /// Create a new user with the given name and a fresh set of credentials.
     pub fn new(username: String) -> Result<Self, String> {
@@ -699,8 +710,12 @@ impl User {
                                 self.username(),
                                 group.group_name
                             );
-                            if let Err(e) = mls_group.clear_pending_proposals(self.provider.storage()) {
-                                log::error!("Error clearing pending proposals on self-removal: {e:?}");
+                            if let Err(e) =
+                                mls_group.clear_pending_proposals(self.provider.storage())
+                            {
+                                log::error!(
+                                    "Error clearing pending proposals on self-removal: {e:?}"
+                                );
                             }
                             return Ok((
                                 PostUpdateActions::Remove,
@@ -1172,6 +1187,26 @@ impl User {
             Some(g) => g,
             None => return Err(format!("No group with name {group_name} known.")),
         };
+
+        // Check there is at least one admin remain after potential leave
+        {
+            let mls_group = group.mls_group.borrow();
+            let self_credential = &self.identity.borrow().credential_with_key.credential;
+
+            let admins = get_admins_from_extensions(mls_group.extensions())
+                .map_err(|e| format!("Failed to get admins from extensions: {e}"))?;
+
+            let other_admins_exist = admins.iter().any(|admin| {
+                admin != self_credential
+                    && mls_group
+                        .members()
+                        .any(|member| &member.credential == admin)
+            });
+
+            if !other_admins_exist {
+                return Err("Cannot leave the group as the only admin. Please promote another member to admin before leaving.".to_string());
+            }
+        }
 
         // Remove operation on the mls group
         let leave_message = group
