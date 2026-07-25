@@ -39,7 +39,7 @@ use crate::{
 use crate::{
     components::vc_derivation_info::{
         DerivationInfo, DerivationInfoTbe, EmulationEpochState, EpochEncryptionKey, EpochId,
-        OperationSecret, VirtualClientOperationType, VirtualClientsError,
+        ExternalInitSecret, OperationSecret, VirtualClientOperationType, VirtualClientsError,
     },
     components::vc_operation_tree::OperationSecretTree,
     extensions::AppDataDictionary,
@@ -88,6 +88,9 @@ use super::{
     AddProposal, CreateCommitResult, GroupContextExtensionProposal, MlsGroup, MlsGroupState,
     MlsMessageOut, PendingCommitState, Proposal, RemoveProposal, Sender,
 };
+
+#[cfg(feature = "virtual-clients-draft")]
+use super::HandshakeConfirmationData;
 
 #[derive(Debug)]
 struct ExternalCommitInfo {
@@ -758,12 +761,20 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
             // `AppDataDictionary` it produced so the inject step preserves
             // every other entry, including the AppComponents entry that
             // survives across multiple VC commits.
+            // For an external commit, carry the external init secret in the
+            // derivation info so a sibling emulator client can process the
+            // commit without holding the previous epoch's `external_secret`.
+            // Regular commits carry no external init secret.
+            let external_init_secret =
+                is_external_commit.then(|| group.group_epoch_secrets().init_secret());
             Some(apply_vc_emulation(
                 loaded,
                 &mut cur_stage.leaf_node_parameters,
                 loaded.resolved_dictionary.clone(),
                 crypto,
                 ciphersuite,
+                group.group_id(),
+                external_init_secret,
             )?)
         } else {
             None
@@ -1195,13 +1206,15 @@ impl CommitBuilder<'_, Complete, &mut MlsGroup> {
         //
         // Note that this performs writes to the storage, so we should do that here, rather than
         // when working with the result.
-        let mls_message = group.content_to_mls_message(create_commit_result.commit, provider)?;
+        let framing = group.content_to_mls_message(create_commit_result.commit, provider)?;
 
         Ok(CommitMessageBundle {
             version: group.version(),
-            commit: mls_message,
+            commit: framing.message,
             welcome: create_commit_result.welcome_option,
             group_info: create_commit_result.group_info,
+            #[cfg(feature = "virtual-clients-draft")]
+            confirmation: framing.confirmation,
         })
     }
 }
@@ -1212,7 +1225,7 @@ impl CommitBuilder<'_, Complete, &mut MlsGroup> {
 /// `leaf_node_parameters`'s `app_data_dictionary` extension.
 ///
 /// The `DerivationInfoTbe` wrapping stays in the emulation epoch's
-/// ciphersuite, while the operation secret is expanded under the
+/// ciphersuite, while the operation secret is imported into the
 /// higher-level group ciphersuite to produce MLS path material for this
 /// group. The generation was consumed and the advanced tree persisted when
 /// `vc_emulation` was called, so this helper neither allocates nor
@@ -1224,17 +1237,21 @@ fn apply_vc_emulation(
     resolved_dictionary: AppDataDictionary,
     crypto: &impl OpenMlsCrypto,
     group_ciphersuite: openmls_traits::types::Ciphersuite,
+    group_id: &crate::prelude::GroupId,
+    external_init_secret: Option<&crate::schedule::InitSecret>,
 ) -> Result<crate::treesync::diff::OwnUpdatePathOverride, CreateCommitError> {
-    let emulation_ciphersuite = loaded.emulation_ciphersuite;
-
-    let path_secret = loaded
-        .operation_secret
+    let target_operation_secret = loaded.operation_secret.derive_target_operation_secret(
+        crypto,
+        group_ciphersuite,
+        group_id,
+    )?;
+    let path_secret = target_operation_secret
         .derive_path_generation_secret(crypto, group_ciphersuite)?
         .into();
-    let leaf_encryption_keypair = loaded
-        .operation_secret
+    let leaf_encryption_keypair = target_operation_secret
         .derive_encryption_key_secret(crypto, group_ciphersuite)?
         .generate_encryption_key_pair(crypto, group_ciphersuite)?;
+    drop(target_operation_secret);
 
     // Wrap the TBE under the per-epoch AEAD key, bound to the new leaf via
     // its serialized encryption key as derivation context.
@@ -1243,15 +1260,17 @@ fn apply_vc_emulation(
         .tls_serialize_detached()
         .map_err(VirtualClientsError::from)?;
     // leaf_node operations are not batched, so the TBE carries no
-    // key_package_index: the select resolves to the empty `update`/`commit`
-    // case and the field is absent on the wire.
+    // key_package_index. For an external commit the commit-case
+    // `external_init_secret` is present; for a regular commit it is absent.
     let tbe = DerivationInfoTbe::LeafNode {
         leaf_index: loaded.emulation_leaf_index,
         generation: loaded.generation,
+        external_init_secret: external_init_secret
+            .map(|init_secret| ExternalInitSecret::from_slice(init_secret.as_slice())),
     };
     let derivation_info = DerivationInfo::encrypt(
         crypto,
-        emulation_ciphersuite,
+        loaded.emulation_ciphersuite,
         &loaded.epoch_encryption_key,
         loaded.epoch_id.clone(),
         &leaf_encryption_key,
@@ -1334,6 +1353,10 @@ pub struct CommitMessageBundle {
     commit: MlsMessageOut,
     welcome: Option<Welcome>,
     group_info: Option<GroupInfo>,
+    /// Confirmation data for a commit framed as a PrivateMessage, `None` for a
+    /// plaintext-framed commit.
+    #[cfg(feature = "virtual-clients-draft")]
+    confirmation: Option<HandshakeConfirmationData>,
 }
 
 /// The result of a commit with an add proposal. This includes
@@ -1379,6 +1402,8 @@ impl CommitMessageBundle {
             commit,
             welcome,
             group_info,
+            #[cfg(feature = "virtual-clients-draft")]
+            confirmation: None,
         }
     }
 }
@@ -1410,6 +1435,28 @@ impl CommitMessageBundle {
     /// For owned version, see [`Self::into_group_info`].
     pub fn group_info(&self) -> Option<&GroupInfo> {
         self.group_info.as_ref()
+    }
+
+    /// Gets the confirmation data for this commit. Present when the commit was
+    /// framed as a PrivateMessage, `None` when it was framed as a plaintext
+    /// PublicMessage. Pass its `epoch` and `generation` to
+    /// [`MlsGroup::confirm_handshake_message`] once the DS has accepted the
+    /// commit. For an owning version, see [`Self::take_confirmation`].
+    ///
+    /// [`MlsGroup::confirm_handshake_message`]: crate::group::MlsGroup::confirm_handshake_message
+    #[cfg(feature = "virtual-clients-draft")]
+    pub fn confirmation(&self) -> Option<&HandshakeConfirmationData> {
+        self.confirmation.as_ref()
+    }
+
+    /// Takes the confirmation data out of the bundle, leaving `None` in its
+    /// place. Call this before handing the bundle to a consuming accessor such
+    /// as [`Self::into_commit`], [`Self::into_contents`], or
+    /// [`Self::into_messages`], which drop the confirmation data. For a
+    /// borrowed version, see [`Self::confirmation`].
+    #[cfg(feature = "virtual-clients-draft")]
+    pub fn take_confirmation(&mut self) -> Option<HandshakeConfirmationData> {
+        self.confirmation.take()
     }
 
     /// Gets all three messages, some of which optional. For owned version, see

@@ -2,6 +2,7 @@
 //!
 //! This module contains errors that originate at lower levels and are partially re-exported in errors thrown by functions of the `MlsGroup` API.
 
+use openmls_traits::types::Ciphersuite;
 use thiserror::Error;
 
 #[cfg(feature = "extensions-draft")]
@@ -18,7 +19,10 @@ use crate::{
     key_packages::errors::{KeyPackageExtensionSupportError, KeyPackageVerifyError},
     messages::{group_info::GroupInfoError, GroupSecretsError},
     prelude::ExtensionType,
-    schedule::{errors::PskError, PreSharedKeyId},
+    schedule::{
+        errors::{KeyScheduleError, PskError},
+        PreSharedKeyId,
+    },
     treesync::errors::*,
 };
 
@@ -61,6 +65,9 @@ pub enum WelcomeError<StorageError> {
     /// We don't support all capabilities of the group.
     #[error("We don't support all capabilities of the group.")]
     UnsupportedCapability,
+    /// The crypto provider doesn't support the ciphersuite of the group we are trying to join.
+    #[error("Ciphersuite {0:?} of the group we are trying to join is not supported by the crypto provider.")]
+    UnsupportedCiphersuite(Ciphersuite),
     /// Sender not found in tree.
     #[error("Sender not found in tree.")]
     UnknownSender,
@@ -106,6 +113,9 @@ pub enum WelcomeError<StorageError> {
     #[cfg(feature = "virtual-clients-draft")]
     #[error(transparent)]
     VirtualClientsError(#[from] crate::components::vc_derivation_info::VirtualClientsError),
+    /// This error indicates that computing the key schedule failed
+    #[error(transparent)]
+    KeySchedule(#[from] KeyScheduleError),
 }
 
 /// External Commit error
@@ -121,8 +131,8 @@ pub enum ExternalCommitError<StorageError> {
     #[error("No external_pub extension available to join group by external commit.")]
     MissingExternalPub,
     /// We don't support the ciphersuite of the group we are trying to join.
-    #[error("We don't support the ciphersuite of the group we are trying to join.")]
-    UnsupportedCiphersuite,
+    #[error("Ciphersuite {0:?} of the group we are trying to join is not supported by the crypto provider.")]
+    UnsupportedCiphersuite(Ciphersuite),
     /// Sender not found in tree.
     #[error("Sender not found in tree.")]
     UnknownSender,
@@ -158,8 +168,8 @@ impl<StorageError> From<ExternalCommitBuilderError<StorageError>>
             ExternalCommitBuilderError::MissingExternalPub => {
                 ExternalCommitError::MissingExternalPub
             }
-            ExternalCommitBuilderError::UnsupportedCiphersuite => {
-                ExternalCommitError::UnsupportedCiphersuite
+            ExternalCommitBuilderError::UnsupportedCiphersuite(ciphersuite) => {
+                ExternalCommitError::UnsupportedCiphersuite(ciphersuite)
             }
             ExternalCommitBuilderError::PublicGroupError(creation_from_external_error) => {
                 ExternalCommitError::PublicGroupError(creation_from_external_error)
@@ -177,6 +187,100 @@ impl<StorageError> From<ExternalCommitBuilderError<StorageError>>
             }
         }
     }
+}
+
+/// Error joining a higher-level group as a virtual client's sibling emulator
+/// by processing another sibling's external commit
+/// ([`MlsGroup::vc_join_via_sibling_external_commit`]).
+///
+/// [`MlsGroup::vc_join_via_sibling_external_commit`]: crate::group::MlsGroup::vc_join_via_sibling_external_commit
+#[cfg(feature = "virtual-clients-draft")]
+#[derive(Error, Debug)]
+pub enum VcExternalCommitJoinError<StorageError> {
+    /// See [`LibraryError`] for more details.
+    #[error(transparent)]
+    LibraryError(#[from] LibraryError),
+    /// No ratchet tree available to build the prior-epoch public group.
+    #[error("No ratchet tree available to build the prior-epoch public group.")]
+    MissingRatchetTree,
+    /// The prior-epoch public tree is invalid. See [`CreationFromExternalError`].
+    #[error(transparent)]
+    PublicGroupError(#[from] CreationFromExternalError<StorageError>),
+    /// The external commit could not be parsed or verified.
+    #[error(transparent)]
+    ProcessMessageError(#[from] ProcessMessageError<StorageError>),
+    /// Staging the external commit failed.
+    #[error(transparent)]
+    StageCommitError(#[from] StageCommitError),
+    /// Merging the external commit failed.
+    #[error(transparent)]
+    MergeCommitError(#[from] MergeCommitError<StorageError>),
+    /// The message is not an external commit (`Sender::NewMemberCommit` with a
+    /// Commit body).
+    #[error("The message is not an external commit.")]
+    NotAnExternalCommit,
+    /// The external commit's leaf carries no virtual-clients derivation info,
+    /// so a sibling cannot reconstruct the joining state from it.
+    #[error("The external commit carries no virtual-clients derivation info.")]
+    MissingDerivationInfo,
+    /// The derivation info references a different emulation epoch than the one
+    /// supplied.
+    #[error("The external commit references a different emulation epoch.")]
+    EpochIdMismatch,
+    /// A virtual-clients processing error occurred.
+    #[error(transparent)]
+    VirtualClientsError(#[from] crate::components::vc_derivation_info::VirtualClientsError),
+    /// An error occurred when writing the group to storage.
+    #[error("An error occurred when writing the group to storage.")]
+    StorageError(StorageError),
+}
+
+/// Error bootstrapping a virtual client's sibling emulator into a higher-level
+/// group the virtual client created, by processing the creator's initial group
+/// creation material ([`MlsGroup::vc_join_at_creation`]).
+///
+/// [`MlsGroup::vc_join_at_creation`]: crate::group::MlsGroup::vc_join_at_creation
+#[cfg(feature = "virtual-clients-draft")]
+#[derive(Error, Debug)]
+pub enum VcGroupCreationJoinError<StorageError> {
+    /// See [`LibraryError`] for more details.
+    #[error(transparent)]
+    LibraryError(#[from] LibraryError),
+    /// No ratchet tree available to build the created group's public tree.
+    #[error("No ratchet tree available to build the created group's public tree.")]
+    MissingRatchetTree,
+    /// The created group's public tree is invalid. See
+    /// [`CreationFromExternalError`].
+    #[error(transparent)]
+    PublicGroupError(#[from] CreationFromExternalError<StorageError>),
+    /// The ratchet tree does not consist of exactly the creator's leaf.
+    #[error("The ratchet tree does not consist of exactly the creator's leaf.")]
+    NotASingleLeafTree,
+    /// The creator leaf carries no virtual-clients derivation info.
+    #[error("The creator leaf carries no virtual-clients derivation info.")]
+    MissingDerivationInfo,
+    /// The derivation info references a different emulation epoch than the one
+    /// supplied.
+    #[error("The creator leaf references a different emulation epoch.")]
+    EpochIdMismatch,
+    /// The creator leaf is not `key_package`-sourced, so it is not a virtual
+    /// client's group-creation leaf.
+    #[error("The creator leaf is not key_package-sourced.")]
+    CreatorLeafNotKeyPackageSourced,
+    /// The leaf key material derived from the operation secret does not match
+    /// the creator leaf, so this is not a genuine sibling-created group.
+    #[error("The derived leaf key material does not match the creator leaf.")]
+    LeafKeyMismatch,
+    /// The GroupInfo could not be verified against the reconstructed epoch
+    /// state, so the reconstruction did not reproduce the creator's secrets.
+    #[error("The GroupInfo could not be verified against the reconstructed epoch state.")]
+    ConfirmationTagMismatch,
+    /// A virtual-clients processing error occurred.
+    #[error(transparent)]
+    VirtualClientsError(#[from] crate::components::vc_derivation_info::VirtualClientsError),
+    /// An error occurred when writing the group to storage.
+    #[error("An error occurred when writing the group to storage.")]
+    StorageError(StorageError),
 }
 
 impl<StorageError> From<ExternalCommitBuilderFinalizeError<StorageError>>
@@ -465,10 +569,6 @@ pub enum ValidationError {
         "The ciphersuite in the KeyPackage of the Add proposal does not match the group context."
     )]
     InvalidAddProposalCiphersuite,
-    #[cfg(not(feature = "virtual-clients-draft"))]
-    /// Cannot decrypt own messages because the necessary key has been deleted according to the deletion schedule.
-    #[error("Cannot decrypt own messages.")]
-    CannotDecryptOwnMessage,
     /// See [`ExternalCommitValidationError`] for more details.
     #[error(transparent)]
     ExternalCommitValidation(#[from] ExternalCommitValidationError),

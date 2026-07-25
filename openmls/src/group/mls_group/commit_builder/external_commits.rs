@@ -1,3 +1,4 @@
+use openmls_traits::{crypto::OpenMlsCrypto, types::Ciphersuite};
 use thiserror::Error;
 use tls_codec::Serialize as _;
 
@@ -43,8 +44,8 @@ pub enum ExternalCommitBuilderError<StorageError> {
     #[error("No external_pub extension available to join group by external commit.")]
     MissingExternalPub,
     /// We don't support the ciphersuite of the group we are trying to join.
-    #[error("We don't support the ciphersuite of the group we are trying to join.")]
-    UnsupportedCiphersuite,
+    #[error("Ciphersuite {0:?} of the group we are trying to join is not supported by the crypto provider.")]
+    UnsupportedCiphersuite(Ciphersuite),
     /// This error indicates the public tree is invalid. See
     /// [`CreationFromExternalError`] for more details.
     #[error(transparent)]
@@ -150,6 +151,12 @@ impl ExternalCommitBuilder {
             validate_lifetimes,
         } = self;
 
+        let group_ciphersuite = verifiable_group_info.ciphersuite();
+        provider
+            .crypto()
+            .supports(group_ciphersuite)
+            .map_err(|_| ExternalCommitBuilderError::UnsupportedCiphersuite(group_ciphersuite))?;
+
         // Build the ratchet tree
 
         // Set nodes either from the extension or from the `ratchet_tree`.
@@ -182,7 +189,9 @@ impl ExternalCommitBuilder {
             group_context,
             external_pub.as_slice(),
         )
-        .map_err(|_| ExternalCommitBuilderError::UnsupportedCiphersuite)?;
+        .map_err(|_| {
+            ExternalCommitBuilderError::UnsupportedCiphersuite(group_context.ciphersuite())
+        })?;
 
         // The `EpochSecrets` we create here are essentially zero, with the
         // exception of the `InitSecret`, which is all we need here for the
@@ -340,6 +349,18 @@ impl<'a> CommitBuilder<'a, Initial, MlsGroup> {
             .extend(proposals.into_iter().map(Proposal::psk));
         self
     }
+
+    /// Adds an AppDataUpdateProposal.
+    #[cfg(feature = "extensions-draft")]
+    pub fn add_app_data_update_proposal(
+        mut self,
+        proposal: crate::messages::proposals::AppDataUpdateProposal,
+    ) -> Self {
+        self.stage
+            .own_proposals
+            .push(Proposal::AppDataUpdate(Box::new(proposal)));
+        self
+    }
 }
 
 // Impls that apply only to external commits.
@@ -366,8 +387,12 @@ impl CommitBuilder<'_, super::Complete, MlsGroup> {
             ..
         } = self;
 
-        // Convert AuthenticatedContent messages to MLSMessage.
-        let mls_message = group.content_to_mls_message(create_commit_result.commit, provider)?;
+        // Convert AuthenticatedContent messages to MLSMessage. An external
+        // commit is always framed as a PublicMessage, so it carries no
+        // handshake confirmation data.
+        let mls_message = group
+            .content_to_mls_message(create_commit_result.commit, provider)?
+            .message;
 
         group.reset_aad();
 
@@ -394,6 +419,8 @@ impl CommitBuilder<'_, super::Complete, MlsGroup> {
             commit: mls_message,
             welcome: create_commit_result.welcome_option,
             group_info: create_commit_result.group_info,
+            #[cfg(feature = "virtual-clients-draft")]
+            confirmation: None,
         };
 
         Ok((group, bundle))

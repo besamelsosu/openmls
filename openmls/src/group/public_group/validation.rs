@@ -531,6 +531,7 @@ impl PublicGroup {
     ///  - ValSem240: External Commit, inline Proposals: There MUST be at least one ExternalInit proposal.
     ///  - ValSem241: External Commit, inline Proposals: There MUST be at most one ExternalInit proposal.
     ///  - ValSem242: External Commit must only cover inline proposal in allowlist (ExternalInit, Remove, PreSharedKey)
+    ///  - When the `extensions-draft` feature is enabled, AppDataUpdate proposal is allowed additionally.
     pub(crate) fn validate_external_commit(
         &self,
         proposal_queue: &ProposalQueue,
@@ -551,13 +552,15 @@ impl PublicGroup {
         // [valn0404](https://validation.openmls.tech/#valn0404)
         let contains_denied_proposal = proposal_queue.queued_proposals().any(|p| {
             let is_inline = p.proposal_or_ref_type() == ProposalOrRefType::Proposal;
-            let is_allowed_type = matches!(
-                p.proposal(),
+            let is_allowed_type = match p.proposal() {
                 Proposal::ExternalInit(_)
-                    | Proposal::Remove(_)
-                    | Proposal::PreSharedKey(_)
-                    | Proposal::Custom(_)
-            );
+                | Proposal::Remove(_)
+                | Proposal::PreSharedKey(_)
+                | Proposal::Custom(_) => true,
+                #[cfg(feature = "extensions-draft")]
+                Proposal::AppDataUpdate(_) => true,
+                _ => false,
+            };
             is_inline && !is_allowed_type
         });
         if contains_denied_proposal {
@@ -651,11 +654,6 @@ impl PublicGroup {
         &self,
         proposal_queue: &ProposalQueue,
     ) -> Result<(), AppDataUpdateValidationError> {
-        let no_app_data_updates = proposal_queue.app_data_update_proposals().next().is_none();
-        if no_app_data_updates {
-            return Ok(());
-        }
-
         // retrieve the GroupContextExtensions proposal, if available
         let group_context_extension_proposal = proposal_queue
             .filtered_by_type(ProposalType::GroupContextExtensions)
@@ -664,6 +662,51 @@ impl PublicGroup {
                 _ => None,
             })
             .next();
+
+        // From https://datatracker.ietf.org/doc/html/draft-ietf-mls-extensions#section-4.7-6:
+        // When an MLS group contains the AppDataUpdate proposal type in the proposal_types list in
+        // the group's required_capabilities extension, a GroupContextExtensions proposal MUST NOT
+        // add, remove, or modify the app_data_dictionary GroupContext extension. In other words,
+        // when every member of the group supports the AppDataUpdate proposal, a
+        // GroupContextExtensions proposal could be sent to update some other extension(s), but the
+        // app_data_dictionary GroupContext extension, if it exists, is left as it was.
+        //
+        // This is checked *before* the "no AppDataUpdate proposals" early return below: the rule
+        // binds every commit that carries a GroupContextExtensions proposal, including one with no
+        // accompanying AppDataUpdate proposals. Skipping it in that case would let a bare
+        // GroupContextExtensions proposal rewrite the app_data_dictionary directly, bypassing the
+        // AppDataUpdate machinery.
+        //
+        // The rule is treated as active when the group requires AppDataUpdate either before or
+        // after the commit. Reading only the *proposed* required_capabilities would let a sender
+        // evade the check by dropping AppDataUpdate from required_capabilities in the same
+        // proposal; reading only the *current* required_capabilities would skip the migrating
+        // commit that both introduces the dictionary and adds AppDataUpdate.
+        if let Some(group_context_extension) = group_context_extension_proposal {
+            let current_requires_app_data_update = self
+                .group_context()
+                .extensions()
+                .required_capabilities()
+                .map(|rc| rc.proposal_types().contains(&ProposalType::AppDataUpdate))
+                .unwrap_or(false);
+            let proposed_requires_app_data_update = group_context_extension
+                .extensions()
+                .required_capabilities()
+                .map(|rc| rc.proposal_types().contains(&ProposalType::AppDataUpdate))
+                .unwrap_or(false);
+
+            if (current_requires_app_data_update || proposed_requires_app_data_update)
+                && group_context_extension.extensions().app_data_dictionary()
+                    != self.group_context().extensions().app_data_dictionary()
+            {
+                return Err(AppDataUpdateValidationError::CannotUpdateDictionaryDirectly);
+            }
+        }
+
+        let no_app_data_updates = proposal_queue.app_data_update_proposals().next().is_none();
+        if no_app_data_updates {
+            return Ok(());
+        }
 
         // check ordering
         // return an error if an AppDataUpdate appears before a GroupContextExtensions proposal
@@ -685,32 +728,6 @@ impl PublicGroup {
             .any(|proposal_type| proposal_type == ProposalType::GroupContextExtensions)
         {
             return Err(AppDataUpdateValidationError::IncorrectOrder);
-        }
-
-        if let Some(group_context_extension) = group_context_extension_proposal {
-            let required_capabilities_contain_app_data_update_proposal = group_context_extension
-                .extensions()
-                .required_capabilities()
-                .map(|required_capabilities| {
-                    required_capabilities
-                        .proposal_types()
-                        .contains(&ProposalType::AppDataUpdate)
-                })
-                .unwrap_or(false);
-
-            // From https://datatracker.ietf.org/doc/html/draft-ietf-mls-extensions#section-4.7-6:
-            // When an MLS group contains the AppDataUpdate proposal type in the proposal_types list in
-            // the group's required_capabilities extension, a GroupContextExtensions proposal MUST NOT
-            // add, remove, or modify the app_data_dictionary GroupContext extension. In other words,
-            // when every member of the group supports the AppDataUpdate proposal, a
-            // GroupContextExtensions proposal could be sent to update some other extension(s), but the
-            // app_data_dictionary GroupContext extension, if it exists, is left as it was.
-            if required_capabilities_contain_app_data_update_proposal
-                && group_context_extension.extensions().app_data_dictionary()
-                    != self.group_context().extensions().app_data_dictionary()
-            {
-                return Err(AppDataUpdateValidationError::CannotUpdateDictionaryDirectly);
-            }
         }
 
         // From the draft:

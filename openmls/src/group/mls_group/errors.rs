@@ -5,6 +5,7 @@
 
 // These errors are exposed through `crate::group::errors`.
 
+use openmls_traits::types::Ciphersuite;
 use thiserror::Error;
 
 use crate::{
@@ -54,6 +55,13 @@ pub enum NewGroupError<StorageError> {
     /// A group with the given [`GroupId`] already exists.
     #[error("A group with the given GroupId already exists.")]
     GroupAlreadyExists,
+    /// The ciphersuite is not supported by the crypto provider.
+    #[error("Ciphersuite {0:?} is not supported by the crypto provider.")]
+    UnsupportedCiphersuite(Ciphersuite),
+    /// A virtual-clients processing error occurred.
+    #[cfg(feature = "virtual-clients-draft")]
+    #[error(transparent)]
+    VirtualClientsError(#[from] crate::components::vc_derivation_info::VirtualClientsError),
 }
 
 /// An error when deleting past epoch secrets.
@@ -179,12 +187,6 @@ pub enum ProcessMessageError<StorageError> {
     /// The proposal is invalid for the Sender of type [External](crate::prelude::Sender::External)
     #[error("The proposal is invalid for the Sender of type External")]
     UnsupportedProposalType,
-
-    /// Use `_with_app_data_update` functions for handling AppDataUpdate proposals
-    #[cfg(feature = "extensions-draft")]
-    #[error("Use `_with_app_data_update` functions for handling AppDataUpdate proposals")]
-    FoundAppDataUpdateProposal,
-
     /// The group's GroupContext requires Safe AAD framing, but the message's
     /// `authenticated_data` did not start with a well-formed `SafeAad`.
     #[cfg(feature = "extensions-draft")]
@@ -451,6 +453,18 @@ pub enum SafeExportSecretError<StorageError> {
     Storage(StorageError),
 }
 
+/// Error resolving a processed message carrying an unresolved app data commit.
+#[cfg(feature = "extensions-draft")]
+#[derive(Error, Debug, PartialEq, Clone)]
+pub enum ResolveAppDataCommitError {
+    /// The processed message does not carry an unresolved app data commit.
+    #[error("The processed message does not carry an unresolved app data commit.")]
+    NotAnUnresolvedAppDataCommit,
+    /// See [`StageCommitError`] for more details.
+    #[error(transparent)]
+    StageCommit(#[from] StageCommitError),
+}
+
 /// Export secret error
 #[cfg(feature = "extensions-draft")]
 #[derive(Error, Debug, PartialEq, Clone)]
@@ -606,6 +620,9 @@ mod virtual_clients_draft {
         /// See [`SecretTreeError`] for more details.
         #[error(transparent)]
         SecretTreeError(#[from] SecretTreeError),
+        /// The requested epoch is newer than the group's current epoch.
+        #[error("The requested epoch is newer than the group's current epoch.")]
+        FutureEpoch,
         /// Error writing to storage.
         #[error("Error writing to storage: {0}")]
         StorageError(StorageError),
@@ -619,6 +636,11 @@ mod virtual_clients_draft {
                         MessageEncryptionError::SecretTreeError(e),
                     )
                 }
+                // Unreachable: `create_message` confirms at the current epoch,
+                // which never triggers the future-epoch guard.
+                ConfirmMessageError::FutureEpoch => CreateMessageError::LibraryError(
+                    LibraryError::custom("confirm_application_message reported a future epoch"),
+                ),
                 ConfirmMessageError::StorageError(e) => CreateMessageError::StorageError(e),
             }
         }
