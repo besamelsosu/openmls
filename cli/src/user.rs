@@ -38,6 +38,67 @@ pub struct Group {
     mls_group: RefCell<MlsGroup>,
 }
 
+impl Group {
+    /// Retrieves the admin list extension for this group context.
+    pub fn admin_list(&self) -> Result<AdminListExtension, String> {
+        AdminListExtension::find_in_extensions(self.mls_group.borrow().extensions())
+    }
+
+    /// Checks whether the given credential belongs to an admin of this group.
+    pub fn check_is_admin(&self, credential: &Credential) -> Result<(), String> {
+        let admin_list = self.admin_list()?;
+        if admin_list.admins.contains(credential) {
+            Ok(())
+        } else {
+            Err("Sender is not in the admin list".to_string())
+        }
+    }
+
+    /// Returns whether the given credential is an admin of this group.
+    pub fn is_admin(&self, credential: &Credential) -> bool {
+        self.check_is_admin(credential).is_ok()
+    }
+
+    /// Checks if this group has a pending self-removal proposal for its own leaf index.
+    pub fn has_pending_self_removal(&self) -> bool {
+        let mls_group = self.mls_group.borrow();
+        let own_leaf_index = mls_group.own_leaf_index();
+        mls_group.pending_proposals().any(
+            |queued| matches!(queued.proposal(), Proposal::Remove(r) if r.removed() == own_leaf_index),
+        )
+    }
+
+    /// Verifies that the given credential is an admin and has no pending self-removal.
+    pub fn ensure_can_commit(&self, self_credential: &Credential) -> Result<(), String> {
+        self.check_is_admin(self_credential)
+            .map_err(|e| format!("Authorization error: {e}"))?;
+
+        if self.has_pending_self_removal() {
+            return Err(
+                "Cannot issue a commit while your own removal from the group is pending. \
+                 Wait for another admin to commit it."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks if at least one other active admin (besides `self_credential`) exists in the group members.
+    pub fn other_admin_exists(&self, self_credential: &Credential) -> Result<bool, String> {
+        let admin_list = self.admin_list()?;
+        let mls_group = self.mls_group.borrow();
+
+        let exists = admin_list.admins.iter().any(|admin| {
+            admin != self_credential
+                && mls_group
+                    .members()
+                    .any(|member| &member.credential == admin)
+        });
+
+        Ok(exists)
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct User {
     #[serde(
@@ -67,18 +128,9 @@ fn check_credential_is_admin(
     extensions: &Extensions<GroupContext>,
     credential: &Credential,
 ) -> Result<(), String> {
-    let mut has_admin_list = false;
-    for ext in extensions.iter() {
-        if let Ok(admin_list) = AdminListExtension::from_extension(ext) {
-            has_admin_list = true;
-            if admin_list.admins.contains(credential) {
-                return Ok(());
-            }
-            break;
-        }
-    }
-    if !has_admin_list {
-        Err("Group context extension for admin list is missing".to_string())
+    let admin_list = AdminListExtension::find_in_extensions(extensions)?;
+    if admin_list.admins.contains(credential) {
+        Ok(())
     } else {
         Err("Sender is not in the admin list".to_string())
     }
@@ -87,12 +139,13 @@ fn check_credential_is_admin(
 fn get_admins_from_extensions(
     extensions: &Extensions<GroupContext>,
 ) -> Result<Vec<Credential>, String> {
-    for ext in extensions.iter() {
-        if let Ok(admin_list) = AdminListExtension::from_extension(ext) {
-            return Ok(admin_list.admins);
-        }
-    }
-    Err("Group context extension for admin list is missing".to_string())
+    AdminListExtension::find_in_extensions(extensions).map(|list| list.admins)
+}
+
+fn has_pending_self_removal(mls_group: &MlsGroup, own_leaf_index: LeafNodeIndex) -> bool {
+    mls_group.pending_proposals().any(
+        |queued| matches!(queued.proposal(), Proposal::Remove(r) if r.removed() == own_leaf_index),
+    )
 }
 
 impl User {
@@ -330,19 +383,7 @@ impl User {
 
     pub fn group_admin_names(&self, group_name: &str) -> Result<Vec<String>, String> {
         let group = self.group(group_name)?;
-        let mls_group = group.mls_group.borrow();
-        let extensions = mls_group.extensions();
-
-        let mut admin_list = None;
-        for ext in extensions.iter() {
-            if let Ok(list) = AdminListExtension::from_extension(ext) {
-                admin_list = Some(list);
-                break;
-            }
-        }
-
-        let admin_list = admin_list
-            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+        let admin_list = group.admin_list()?;
 
         let mut admin_names = Vec::new();
         for admin_cred in &admin_list.admins {
@@ -617,16 +658,22 @@ impl User {
                     .store_pending_proposal(self.provider.storage(), *proposal_ptr)
                     .map_err(|e| format!("Error storing pending proposal: {e}"))?;
 
-                // Any admin receiving a leave proposal attempts to commit it ("show must go on").
-                // If another admin's commit reaches the DS first, the DS rejects this send
-                // (e.g. 409 conflict). We then clear our local pending commit so we can process
-                // the winning commit when it arrives in the message queue.
                 let self_is_admin = {
                     let self_credential = &self.identity.borrow().credential_with_key.credential;
-                    check_credential_is_admin(mls_group.extensions(), self_credential).is_ok()
+                    group.is_admin(self_credential)
                 };
 
-                if self_is_admin {
+                let self_has_pending_leave = group.has_pending_self_removal();
+
+                if self_is_admin && self_has_pending_leave {
+                    log::debug!(
+                        "update::leave proposal in group {}; admin {} has itself requested to leave and will not attempt to commit",
+                        group.group_name,
+                        self.username(),
+                    );
+                }
+
+                if self_is_admin && !self_has_pending_leave {
                     log::debug!(
                         "update::leave proposal in group {}; admin {} is attempting to commit",
                         group.group_name,
@@ -685,18 +732,8 @@ impl User {
                 None
             }
             ProcessedMessageContent::StagedCommitMessage(commit_ptr) => {
-                let has_add_or_remove = commit_ptr.add_proposals().next().is_some()
-                    || commit_ptr.remove_proposals().next().is_some()
-                    || commit_ptr
-                        .queued_proposals()
-                        .any(|p| matches!(p.proposal(), Proposal::GroupContextExtensions(_)));
-                if has_add_or_remove {
-                    check_credential_is_admin(
-                        mls_group.extensions(),
-                        &processed_message_credential,
-                    )
+                check_credential_is_admin(mls_group.extensions(), &processed_message_credential)
                     .map_err(|e| format!("Authorization error: {e}"))?;
-                }
 
                 let mut remove_proposal: bool = false;
                 if commit_ptr.self_removed() {
@@ -751,23 +788,6 @@ impl User {
 
         log::debug!("update::Processing messages for {} ", self.username());
         let mut messages = self.backend.recv_msgs(self)?;
-        messages.sort_by_key(|msg| match msg.clone().extract() {
-            MlsMessageBodyIn::PublicMessage(public_message_in) => {
-                match public_message_in.content_type() {
-                    ContentType::Application => 1u8,
-                    ContentType::Proposal => 2u8,
-                    ContentType::Commit => 3u8,
-                }
-            }
-            MlsMessageBodyIn::PrivateMessage(private_message_in) => {
-                match private_message_in.content_type() {
-                    ContentType::Application => 1u8,
-                    ContentType::Proposal => 2u8,
-                    ContentType::Commit => 3u8,
-                }
-            }
-            _ => 0u8,
-        });
         // Go through the list of messages and process or store them.
         for message in messages.drain(..) {
             log::debug!("Reading message format {:#?} ...", message.wire_format());
@@ -889,6 +909,11 @@ impl User {
         Ok(())
     }
 
+    fn ensure_can_commit(&self, group: &Group) -> Result<(), String> {
+        let self_credential = &self.identity.borrow().credential_with_key.credential;
+        group.ensure_can_commit(self_credential)
+    }
+
     /// Invite user with the given name to the group.
     pub fn invite(&mut self, name: String, group_name: String) -> Result<(), String> {
         // First we need to get the key package for {id} from the DS.
@@ -911,12 +936,7 @@ impl User {
         };
 
         // Check authorization
-        {
-            let mls_group = group.mls_group.borrow();
-            let self_credential = &self.identity.borrow().credential_with_key.credential;
-            check_credential_is_admin(mls_group.extensions(), self_credential)
-                .map_err(|e| format!("Authorization error: {e}"))?;
-        }
+        self.ensure_can_commit(group)?;
 
         let (out_messages, welcome, _group_info) = group
             .mls_group
@@ -968,12 +988,7 @@ impl User {
         };
 
         // Check authorization
-        {
-            let mls_group = group.mls_group.borrow();
-            let self_credential = &self.identity.borrow().credential_with_key.credential;
-            check_credential_is_admin(mls_group.extensions(), self_credential)
-                .map_err(|e| format!("Authorization error: {e}"))?;
-        }
+        self.ensure_can_commit(group)?;
 
         // Get the client leaf index
 
@@ -1020,12 +1035,7 @@ impl User {
         };
 
         // Check authorization
-        {
-            let mls_group = group.mls_group.borrow();
-            let self_credential = &self.identity.borrow().credential_with_key.credential;
-            check_credential_is_admin(mls_group.extensions(), self_credential)
-                .map_err(|e| format!("Authorization error: {e}"))?;
-        }
+        self.ensure_can_commit(group)?;
 
         // Get the client leaf index
         let leaf_index = self.find_member_index(name.clone(), group)?;
@@ -1039,16 +1049,7 @@ impl User {
         };
 
         let mut extensions = group.mls_group.borrow().extensions().clone();
-        let mut admin_list = None;
-        for ext in extensions.iter() {
-            if let Ok(list) = AdminListExtension::from_extension(ext) {
-                admin_list = Some(list);
-                break;
-            }
-        }
-
-        let mut admin_list = admin_list
-            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+        let mut admin_list = AdminListExtension::find_in_extensions(&extensions)?;
 
         if admin_list.admins.contains(&target_credential) {
             return Err(format!("{name} is already an admin of group {group_name}"));
@@ -1099,12 +1100,7 @@ impl User {
         };
 
         // Check authorization: Ensure the sender is an admin
-        {
-            let mls_group = group.mls_group.borrow();
-            let self_credential = &self.identity.borrow().credential_with_key.credential;
-            check_credential_is_admin(mls_group.extensions(), self_credential)
-                .map_err(|e| format!("Authorization error: {e}"))?;
-        }
+        self.ensure_can_commit(group)?;
 
         // Get the target client leaf index
         let leaf_index = self.find_member_index(name.clone(), group)?;
@@ -1118,16 +1114,7 @@ impl User {
         };
 
         let mut extensions = group.mls_group.borrow().extensions().clone();
-        let mut admin_list = None;
-        for ext in extensions.iter() {
-            if let Ok(list) = AdminListExtension::from_extension(ext) {
-                admin_list = Some(list);
-                break;
-            }
-        }
-
-        let mut admin_list = admin_list
-            .ok_or_else(|| "Group context extension for admin list is missing".to_string())?;
+        let mut admin_list = AdminListExtension::find_in_extensions(&extensions)?;
 
         // Check target authorization: Ensure the target is actually an admin
         let position = admin_list
@@ -1188,23 +1175,19 @@ impl User {
             None => return Err(format!("No group with name {group_name} known.")),
         };
 
-        // Check there is at least one admin remain after potential leave
+        // Check there is at least one admin remaining after potential leave
         {
-            let mls_group = group.mls_group.borrow();
             let self_credential = &self.identity.borrow().credential_with_key.credential;
 
-            let admins = get_admins_from_extensions(mls_group.extensions())
-                .map_err(|e| format!("Failed to get admins from extensions: {e}"))?;
-
-            let other_admins_exist = admins.iter().any(|admin| {
-                admin != self_credential
-                    && mls_group
-                        .members()
-                        .any(|member| &member.credential == admin)
-            });
-
-            if !other_admins_exist {
+            if !group.other_admin_exists(self_credential)? {
                 return Err("Cannot leave the group as the only admin. Please promote another member to admin before leaving.".to_string());
+            }
+
+            if group.has_pending_self_removal() {
+                return Err(
+                    "You have already requested to leave this group; waiting for an admin to commit your removal."
+                        .to_string(),
+                );
             }
         }
 

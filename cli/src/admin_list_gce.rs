@@ -53,4 +53,14 @@ impl AdminListExtension {
             )),
         }
     }
+
+    /// Finds and parses an `AdminListExtension` from `Extensions<GroupContext>`.
+    pub fn find_in_extensions(extensions: &Extensions<GroupContext>) -> Result<Self, String> {
+        for ext in extensions.iter() {
+            if let Ok(admin_list) = Self::from_extension(ext) {
+                return Ok(admin_list);
+            }
+        }
+        Err("Group context extension for admin list is missing".to_string())
+    }
 }
