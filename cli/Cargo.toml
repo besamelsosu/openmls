@@ -10,7 +10,7 @@ publish = false
 extensions-draft = [
     "openmls/extensions-draft",
     "openmls/extensions-draft-test-dependencies",
-    "openmls_memory_storage/extensions-draft",
+    "openmls_sqlite_storage/extensions-draft",
 ]
 
 [dependencies]
