@@ -662,35 +662,36 @@ impl User {
                 )
                 .map_err(|e| format!("Authorization error: {e}"))?;
 
-                let mut remove_proposal: bool = false;
-                if commit_ptr.self_removed() {
-                    remove_proposal = true;
+                let conversation_message = self.create_commit_message(
+                    &commit_ptr,
+                    &mls_group,
+                    &processed_message_credential,
+                );
+                group.conversation.add(conversation_message.clone());
+                let message_out = (group_name.is_none()
+                    || group_name.as_ref() == Some(&group.group_name))
+                .then_some(conversation_message);
+
+                let remove_proposal = commit_ptr.self_removed();
+                if let Err(e) = mls_group.merge_staged_commit(&self.provider, *commit_ptr) {
+                    return Err(e.to_string());
                 }
-                match mls_group.merge_staged_commit(&self.provider, *commit_ptr) {
-                    Ok(()) => {
-                        if remove_proposal {
-                            log::debug!(
-                                "update::Processing StagedCommitMessage removing {} from group {} ",
-                                self.username(),
-                                group.group_name
-                            );
-                            if let Err(e) =
-                                mls_group.clear_pending_proposals(self.provider.storage())
-                            {
-                                log::error!(
-                                    "Error clearing pending proposals on self-removal: {e:?}"
-                                );
-                            }
-                            return Ok((
-                                PostUpdateActions::Remove,
-                                Some(mls_group.group_id().clone()),
-                                None,
-                            ));
-                        }
+                if remove_proposal {
+                    log::debug!(
+                        "update::Processing StagedCommitMessage removing {} from group {} ",
+                        self.username(),
+                        group.group_name
+                    );
+                    if let Err(e) = mls_group.clear_pending_proposals(self.provider.storage()) {
+                        log::error!("Error clearing pending proposals on self-removal: {e:?}");
                     }
-                    Err(e) => return Err(e.to_string()),
+                    return Ok((
+                        PostUpdateActions::Remove,
+                        Some(mls_group.group_id().clone()),
+                        message_out,
+                    ));
                 }
-                None
+                message_out
             }
             ProcessedMessageContent::OwnPendingCommit => {
                 if let Err(e) = mls_group.merge_pending_commit(&self.provider) {
@@ -736,6 +737,19 @@ impl User {
             self.username(),
         );
 
+        // Snapshot credentials of pending-remove members before the commit
+        // advances the epoch and removes them from the tree.
+        let pending_removals: Vec<Credential> = {
+            let mls_group = group.mls_group.borrow();
+            mls_group
+                .pending_proposals()
+                .filter_map(|p| match p.proposal() {
+                    Proposal::Remove(rem) => mls_group.member(rem.removed()).cloned(),
+                    _ => None,
+                })
+                .collect()
+        };
+
         let commit_msg = {
             let mut mls_group = group.mls_group.borrow_mut();
             match mls_group
@@ -763,6 +777,11 @@ impl User {
                     .borrow_mut()
                     .merge_pending_commit(&self.provider)
                     .map_err(|e| format!("Error merging pending commit after leave: {e}"))?;
+
+                // Strip removed members from the admin list now that the commit is confirmed.
+                for cred in &pending_removals {
+                    self.remove_from_admin_list(group, cred)?;
+                }
             }
             Err(e) => {
                 log::debug!(
@@ -936,6 +955,43 @@ impl User {
         group.ensure_can_commit(self_credential)
     }
 
+    /// Sends a GCE commit that removes `target` from the admin list and merges
+    /// it locally. Returns an error if the target is not currently an admin.
+    fn remove_from_admin_list(&self, group: &Group, target: &Credential) -> Result<(), String> {
+        if !group.is_admin(target) {
+            Ok(())
+        } else {
+            let mut extensions = group.mls_group.borrow().extensions().clone();
+            let mut admin_list = AdminListExtension::find_in_extensions(&extensions)?;
+
+            admin_list.admins.retain(|a| a != target);
+            let new_ext = admin_list.to_extension().map_err(|e| e.to_string())?;
+            extensions
+                .add_or_replace(new_ext)
+                .map_err(|e| e.to_string())?;
+
+            let (commit, _welcome, _group_info) = group
+                .mls_group
+                .borrow_mut()
+                .update_group_context_extensions(
+                    &self.provider,
+                    extensions,
+                    &self.identity.borrow().signer,
+                )
+                .map_err(|e| format!("Failed to update admin list - {e}"))?;
+
+            let recipients = self.recipients(group);
+            self.backend
+                .send_msg(&GroupMessage::new(commit.into(), &recipients))?;
+
+            group
+                .mls_group
+                .borrow_mut()
+                .merge_pending_commit(&self.provider)
+                .map_err(|e| format!("Error merging admin-list commit: {e}"))
+        }
+    }
+
     /// Invite user with the given name to the group.
     pub fn invite(&mut self, name: String, group_name: String) -> Result<(), String> {
         // First we need to get the key package for {id} from the DS.
@@ -1013,8 +1069,10 @@ impl User {
         self.ensure_can_commit(group)?;
 
         // Get the client leaf index
-
         let leaf_index = self.find_member_index(name, group)?;
+
+        // Snapshot the target's credential before the remove commit changes the tree.
+        let target_credential = group.mls_group.borrow().member(leaf_index).cloned();
 
         // Remove operation on the mls group
         let (remove_message, _welcome, _group_info) = group
@@ -1027,19 +1085,21 @@ impl User {
             )
             .map_err(|e| format!("Failed to remove member from group - {e}"))?;
 
-        // First, send the MlsMessage remove commit to the group.
         log::trace!("Sending commit");
         let group_recipients = self.recipients(group);
-
         let msg = GroupMessage::new(remove_message.into(), &group_recipients);
         self.backend.send_msg(&msg)?;
 
-        // Second, process the removal on our end.
         group
             .mls_group
             .borrow_mut()
             .merge_pending_commit(&self.provider)
             .expect("error merging pending commit");
+
+        // Strip the removed member from the admin list now that the removal is confirmed.
+        if let Some(cred) = target_credential {
+            self.remove_from_admin_list(group, &cred)?;
+        }
 
         drop(groups);
 
@@ -1135,50 +1195,17 @@ impl User {
                 .ok_or_else(|| format!("Could not find member credential for {name}"))?
         };
 
-        let mut extensions = group.mls_group.borrow().extensions().clone();
-        let mut admin_list = AdminListExtension::find_in_extensions(&extensions)?;
-
-        // Check target authorization: Ensure the target is actually an admin
-        let position = admin_list
-            .admins
-            .iter()
-            .position(|cred| cred == &target_credential)
-            .ok_or_else(|| format!("{name} is not an admin of group {group_name}"))?;
-
-        // Optional safety guard: prevents leaving the group with 0 admins
+        // Check target is actually an admin and not the last one.
+        let admin_list =
+            AdminListExtension::find_in_extensions(group.mls_group.borrow().extensions())?;
+        if !admin_list.admins.contains(&target_credential) {
+            return Err(format!("{name} is not an admin of group {group_name}"));
+        }
         if admin_list.admins.len() <= 1 {
             return Err("Cannot demote the last admin of the group".to_string());
         }
 
-        // Remove the target admin credential
-        admin_list.admins.remove(position);
-
-        let new_ext = admin_list.to_extension().map_err(|e| e.to_string())?;
-        extensions
-            .add_or_replace(new_ext)
-            .map_err(|e| e.to_string())?;
-
-        let (commit, _welcome, _group_info) = group
-            .mls_group
-            .borrow_mut()
-            .update_group_context_extensions(
-                &self.provider,
-                extensions,
-                &self.identity.borrow().signer,
-            )
-            .map_err(|e| format!("Failed to update group context extensions - {e}"))?;
-
-        // Send the commit to the group
-        let group_recipients = self.recipients(group);
-        let msg = GroupMessage::new(commit.into(), &group_recipients);
-        self.backend.send_msg(&msg)?;
-
-        // Process the staged commit on our end
-        group
-            .mls_group
-            .borrow_mut()
-            .merge_pending_commit(&self.provider)
-            .expect("error merging pending commit");
+        self.remove_from_admin_list(group, &target_credential)?;
 
         drop(groups);
 
@@ -1297,5 +1324,111 @@ impl User {
 
     pub(super) fn auth_token(&self) -> Option<&AuthToken> {
         self.auth_token.as_ref()
+    }
+
+    fn committer_name(&self, cred: &Credential, mls_group: &MlsGroup) -> String {
+        let Ok(basic) = BasicCredential::try_from(cred.clone()) else {
+            return "Unknown".to_string();
+        };
+        let id = basic.identity();
+        if let Some(c) = self.contacts.get(id) {
+            return String::from_utf8_lossy(&c.id).to_string();
+        }
+        mls_group
+            .members()
+            .find_map(|m| {
+                BasicCredential::try_from(m.credential.clone())
+                    .ok()
+                    .filter(|mc| mc.identity() == id)
+                    .map(|mc| String::from_utf8_lossy(mc.identity()).to_string())
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(id).to_string())
+    }
+
+    fn create_commit_message(
+        &self,
+        commit: &StagedCommit,
+        mls_group: &MlsGroup,
+        committer_cred: &Credential,
+    ) -> ConversationMessage {
+        let committer = self.committer_name(committer_cred, mls_group);
+        let explanations: Vec<_> = commit
+            .queued_proposals()
+            .map(|p| format_proposal_explanation(p, mls_group))
+            .collect();
+
+        let text = if explanations.is_empty() {
+            if commit.update_path_leaf_node().is_some() {
+                format!("Updated member {committer}")
+            } else {
+                "Commit".to_string()
+            }
+        } else {
+            explanations.join("\n")
+        };
+
+        ConversationMessage::new(text, committer)
+    }
+}
+
+fn basic_cred_name(cred: &Credential) -> String {
+    BasicCredential::try_from(cred.clone())
+        .map(|c| String::from_utf8_lossy(c.identity()).to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn explain_gce_proposal(
+    gce: &GroupContextExtensionProposal,
+    current_exts: &Extensions<GroupContext>,
+) -> String {
+    if let Ok(new_list) = AdminListExtension::find_in_extensions(gce.extensions()) {
+        let old_admins = AdminListExtension::find_in_extensions(current_exts)
+            .map(|a| a.admins)
+            .unwrap_or_default();
+        if let Some(new_admin) = new_list.admins.iter().find(|a| !old_admins.contains(a)) {
+            return format!("Promoted member {}", basic_cred_name(new_admin));
+        }
+        if let Some(old_admin) = old_admins.iter().find(|a| !new_list.admins.contains(a)) {
+            return format!("Demoted member {}", basic_cred_name(old_admin));
+        }
+    }
+    "Updated group context extensions".to_string()
+}
+
+fn format_proposal_explanation(proposal: &QueuedProposal, mls_group: &MlsGroup) -> String {
+    match proposal.proposal() {
+        Proposal::Add(add) => {
+            format!(
+                "Added member {}",
+                basic_cred_name(add.key_package().leaf_node().credential())
+            )
+        }
+        Proposal::Remove(rem) => {
+            let name = mls_group
+                .member(rem.removed())
+                .map(basic_cred_name)
+                .unwrap_or_else(|| format!("at index {}", rem.removed()));
+            if matches!(proposal.sender(), Sender::Member(idx) if *idx == rem.removed()) {
+                format!("{name} left the group")
+            } else {
+                format!("Removed member {name}")
+            }
+        }
+        Proposal::Update(upd) => {
+            format!(
+                "Updated member {}",
+                basic_cred_name(upd.leaf_node().credential())
+            )
+        }
+        Proposal::GroupContextExtensions(gce) => explain_gce_proposal(gce, mls_group.extensions()),
+        Proposal::PreSharedKey(_) => "Pre-shared key proposal".into(),
+        Proposal::ReInit(_) => "Re-initialization proposal".into(),
+        Proposal::ExternalInit(_) => "External initialization proposal".into(),
+        Proposal::SelfRemove => "Self removal proposal".into(),
+        Proposal::Custom(_) => "Custom proposal".into(),
+        #[cfg(feature = "extensions-draft")]
+        Proposal::AppDataUpdate(_) => "App data update proposal".into(),
+        #[cfg(feature = "extensions-draft")]
+        Proposal::AppEphemeral(_) => "App ephemeral proposal".into(),
     }
 }
