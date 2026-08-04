@@ -1,5 +1,5 @@
 use base64::Engine;
-use tls_codec::{Deserialize, TlsVecU16, TlsVecU32};
+use tls_codec::{Deserialize, TlsVecU16};
 use url::Url;
 
 use crate::networking::get_with_body;
@@ -45,19 +45,6 @@ impl Backend {
                 .map_err(|e| format!("Error decoding server response: {e:?}"))?;
 
         Ok(response.auth_token)
-    }
-
-    /// Get a list of all clients with name, ID, and key packages from the
-    /// server.
-    pub fn list_clients(&self) -> Result<Vec<Vec<u8>>, String> {
-        let mut url = self.ds_url.clone();
-        url.set_path("/clients/list");
-
-        let response = get(&url)?;
-        match TlsVecU32::<Vec<u8>>::tls_deserialize(&mut response.as_slice()) {
-            Ok(clients) => Ok(clients.into()),
-            Err(e) => Err(format!("Error decoding server response: {e:?}")),
-        }
     }
 
     /// Get and reserve a key package for a client.

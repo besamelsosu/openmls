@@ -44,7 +44,7 @@ use axum::{
 use base64::Engine;
 use clap::Command;
 use parking_lot::Mutex;
-use tls_codec::{Deserialize, Serialize, TlsSliceU16, TlsVecU32};
+use tls_codec::{Deserialize, Serialize, TlsSliceU16};
 
 use ds_lib::{
     messages::{
@@ -129,24 +129,6 @@ async fn register_client(State(data): State<Arc<DsData>>, body: Bytes) -> Respon
     assert!(old.is_none());
 
     response.tls_serialize_detached().unwrap().into_response()
-}
-
-/// Returns a list of clients with their names and IDs.
-async fn list_clients(State(data): State<Arc<DsData>>) -> Response {
-    log::debug!("Listing clients");
-    let clients = data.clients.lock();
-
-    // XXX: we could encode while iterating to be less wasteful.
-    let clients: TlsVecU32<Vec<u8>> = clients
-        .values()
-        .map(|c| c.id().to_vec())
-        .collect::<Vec<Vec<u8>>>()
-        .into();
-    let mut out_bytes = Vec::new();
-    if clients.tls_serialize(&mut out_bytes).is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    out_bytes.into_response()
 }
 
 /// Resets the server state.
@@ -448,7 +430,6 @@ async fn debug_dump(State(data): State<Arc<DsData>>) -> Response {
 fn app(data: Arc<DsData>) -> Router {
     Router::new()
         .route("/clients/register", post(register_client))
-        .route("/clients/list", get(list_clients))
         .route(
             "/clients/key_packages/{id}",
             get(get_key_packages).post(publish_key_packages),

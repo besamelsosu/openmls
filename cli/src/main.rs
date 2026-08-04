@@ -55,16 +55,12 @@ fn print_user_info(client: &Option<user::User>) {
             let username = client.username();
             let group_names = client.group_names();
             let group_count = group_names.len();
-            let contact_names = client.contact_names();
-            let contact_count = contact_names.len();
             let kp_count = client.key_packages().len();
 
             println!(" >>> User info:");
             println!("     Username: {username}");
             println!("     Groups: {group_count}");
             println!("     Group names: {group_names:?}");
-            println!("     Known contacts: {contact_count}");
-            println!("     Contact names: {contact_names:?}");
             println!("     Key packages: {kp_count}");
         }
         None => {

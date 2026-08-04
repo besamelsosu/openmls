@@ -104,12 +104,6 @@ impl ClientInfo {
         }
     }
 
-    /// The identity of a client is defined as the identity of the first key
-    /// package right now.
-    pub fn id(&self) -> &[u8] {
-        self.id.as_slice()
-    }
-
     /// Acquire a key package from the client's key packages
     /// Mark the key package hash ref as "reserved key package"
     /// The reserved hash ref will be used in DS::send_welcome and removed once welcome is distributed

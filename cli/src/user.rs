@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::{
     cell::{Ref, RefCell},
@@ -16,21 +15,9 @@ use crate::admin_list_gce::{AdminListExtension, ADMIN_LIST_EXT_TYPE};
 use super::{
     backend::Backend, conversation::Conversation, conversation::ConversationMessage,
     identity::Identity, openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto,
-    serialize_any_hashmap,
 };
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub struct Contact {
-    id: Vec<u8>,
-}
-
-impl Contact {
-    pub fn username(&self) -> String {
-        String::from_utf8(self.id.clone()).unwrap()
-    }
-}
 
 pub struct Group {
     group_name: String,
@@ -109,11 +96,6 @@ impl Group {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct User {
-    #[serde(
-        serialize_with = "serialize_any_hashmap::serialize_hashmap",
-        deserialize_with = "serialize_any_hashmap::deserialize_hashmap"
-    )]
-    pub(crate) contacts: HashMap<Vec<u8>, Contact>,
     #[serde(skip)]
     pub(crate) groups: RefCell<HashMap<String, Group>>,
     group_list: HashSet<String>,
@@ -139,7 +121,6 @@ impl User {
         let out = Self {
             groups: RefCell::new(HashMap::new()),
             group_list: HashSet::new(),
-            contacts: HashMap::new(),
             identity: RefCell::new(Identity::new(CIPHERSUITE, &crypto, username.as_bytes())),
             backend: Backend::default(),
             provider: crypto,
@@ -157,24 +138,11 @@ impl User {
     fn persist_metadata(&self) -> Result<(), String> {
         let user_name = self.username();
 
-        // Convert HashMap<Vec<u8>, Contact> to Vec<(Vec<u8>, Contact)> for JSON serialization
-        let contacts_vec: Vec<(Vec<u8>, Contact)> = self
-            .contacts
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let contacts_json = serde_json::to_string(&contacts_vec).map_err(|e| e.to_string())?;
         let group_list_json = serde_json::to_string(&self.group_list).map_err(|e| e.to_string())?;
         let auth_token_json = serde_json::to_string(&self.auth_token).map_err(|e| e.to_string())?;
         let identity_json =
             serde_json::to_string(&*self.identity.borrow()).map_err(|e| e.to_string())?;
 
-        self.provider
-            .write_value(
-                Self::metadata_key(&user_name, "contacts"),
-                contacts_json.into_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
         self.provider
             .write_value(
                 Self::metadata_key(&user_name, "group_list"),
@@ -200,19 +168,7 @@ impl User {
     fn load_metadata(
         user_name: &str,
         provider: &OpenMlsRustPersistentCrypto,
-    ) -> Result<
-        (
-            HashMap<Vec<u8>, Contact>,
-            HashSet<String>,
-            Option<AuthToken>,
-            Option<Identity>,
-        ),
-        String,
-    > {
-        let contacts_bytes = provider
-            .read_value(Self::metadata_key(user_name, "contacts"))
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
+    ) -> Result<(HashSet<String>, Option<AuthToken>, Option<Identity>), String> {
         let group_list_bytes = provider
             .read_value(Self::metadata_key(user_name, "group_list"))
             .map_err(|e| e.to_string())?
@@ -226,13 +182,6 @@ impl User {
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
 
-        let contacts: HashMap<Vec<u8>, Contact> = if contacts_bytes.is_empty() {
-            HashMap::new()
-        } else {
-            let contacts_vec: Vec<(Vec<u8>, Contact)> =
-                serde_json::from_slice(&contacts_bytes).map_err(|e| e.to_string())?;
-            contacts_vec.into_iter().collect()
-        };
         let group_list: HashSet<String> = if group_list_bytes.is_empty() {
             HashSet::new()
         } else {
@@ -249,13 +198,12 @@ impl User {
             Some(serde_json::from_slice(&identity_bytes).map_err(|e| e.to_string())?)
         };
 
-        Ok((contacts, group_list, auth_token, identity))
+        Ok((group_list, auth_token, identity))
     }
 
     pub fn load(user_name: String) -> Result<Self, String> {
         let provider = OpenMlsRustPersistentCrypto::new(&user_name)?;
-        let (contacts, group_list, auth_token, identity) =
-            Self::load_metadata(&user_name, &provider)?;
+        let (group_list, auth_token, identity) = Self::load_metadata(&user_name, &provider)?;
 
         let identity = match identity {
             Some(id) => id,
@@ -265,7 +213,6 @@ impl User {
         let mut user = Self {
             groups: RefCell::new(HashMap::new()),
             group_list,
-            contacts,
             identity: RefCell::new(identity),
             backend: Backend::default(),
             provider,
@@ -343,16 +290,6 @@ impl User {
         group_names
     }
 
-    pub fn contact_names(&self) -> Vec<String> {
-        let mut contact_names: Vec<String> = self
-            .contacts
-            .values()
-            .map(|contact| contact.username())
-            .collect();
-        contact_names.sort();
-        contact_names
-    }
-
     pub fn group_member_names(&self, group_name: &str) -> Result<Vec<String>, String> {
         let group = self.group(group_name)?;
         let mls_group = group.mls_group.borrow();
@@ -422,14 +359,10 @@ impl User {
             {
                 let credential = BasicCredential::try_from(credential).unwrap();
                 log::debug!(
-                    "Searching for contact {:?}",
-                    str::from_utf8(credential.identity()).unwrap()
+                    "Adding group member {:?} as recipient",
+                    String::from_utf8_lossy(credential.identity())
                 );
-                let contact = match self.contacts.get(credential.identity()) {
-                    Some(c) => c.id.clone(),
-                    None => panic!("There's a member in the group we don't know."),
-                };
-                recipients.push(contact);
+                recipients.push(credential.identity().to_vec());
             }
         }
         recipients
@@ -499,46 +432,6 @@ impl User {
         Ok(())
     }
 
-    /// Update the user clients list.
-    /// It updates the contacts with all the clients known by the server
-    fn update_clients(&mut self) {
-        match self.backend.list_clients() {
-            Ok(mut v) => {
-                for client_id in v.drain(..) {
-                    log::debug!(
-                        "update::Processing client for contact {:?}",
-                        str::from_utf8(&client_id).unwrap()
-                    );
-                    if client_id != self.identity.borrow().identity()
-                        && self
-                            .contacts
-                            .insert(
-                                client_id.clone(),
-                                Contact {
-                                    id: client_id.clone(),
-                                },
-                            )
-                            .is_some()
-                    {
-                        log::debug!(
-                            "update::added client to contact {:?}",
-                            str::from_utf8(&client_id).unwrap()
-                        );
-                        log::trace!("Updated client {}", "");
-                    }
-                }
-            }
-            Err(e) => log::debug!("update_clients::Error reading clients from DS: {e:?}"),
-        }
-        log::debug!("update::Processing clients done, contact list is:");
-        for contact_id in self.contacts.borrow().keys() {
-            log::debug!(
-                "update::Parsing contact {:?}",
-                str::from_utf8(contact_id).unwrap()
-            );
-        }
-    }
-
     fn process_protocol_message(
         &mut self,
         group_name: Option<String>,
@@ -580,34 +473,7 @@ impl User {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
                 let processed_message_credential =
                     BasicCredential::try_from(processed_message_credential.clone()).unwrap();
-                let sender_name = match self.contacts.get(processed_message_credential.identity()) {
-                    Some(c) => c.id.clone(),
-                    None => {
-                        // Contact list is not updated right now, get the identity from the
-                        // mls_group member
-                        let user_id = mls_group.members().find_map(|m| {
-                                let m_credential = BasicCredential::try_from(m.credential.clone()).unwrap();
-                                if m_credential.identity()
-                                    == processed_message_credential.identity()
-                                    && (self
-                                        .identity
-                                        .borrow()
-                                        .credential_with_key
-                                        .signature_key
-                                        .as_slice()
-                                        != m.signature_key.as_slice())
-                                {
-                                    log::debug!("update::Processing ApplicationMessage read sender name from credential identity for group {} ", group.group_name);
-                                    Some(
-                                        str::from_utf8(m_credential.identity()).unwrap().to_owned(),
-                                    )
-                                } else {
-                                    None
-                                }
-                            });
-                        user_id.unwrap_or("".to_owned()).as_bytes().to_vec()
-                    }
-                };
+                let sender_name = processed_message_credential.identity().to_vec();
                 let conversation_message = ConversationMessage::new(
                     String::from_utf8(application_message.into_bytes())
                         .unwrap()
@@ -802,7 +668,6 @@ impl User {
 
     /// Update the user. This involves:
     /// * retrieving all new messages from the server
-    /// * update the contacts with all other clients known to the server
     pub fn update(
         &mut self,
         group_name: Option<String>,
@@ -877,8 +742,6 @@ impl User {
                 }
             }
         }
-
-        self.update_clients();
 
         self.persist_metadata()?;
 
@@ -994,16 +857,11 @@ impl User {
 
     /// Invite user with the given name to the group.
     pub fn invite(&mut self, name: String, group_name: String) -> Result<(), String> {
-        // First we need to get the key package for {id} from the DS.
-        let contact = match self.contacts.values().find(|c| c.username() == name) {
-            Some(v) => v,
-            None => return Err(format!("No contact with name {name} known.")),
-        };
-
-        // Reclaim a key package from the server
+        // Client names are DS identities, so requesting the key package
+        // directly avoids downloading and searching the complete client list.
         let joiner_key_package = self
             .backend
-            .consume_key_package(&contact.id)
+            .consume_key_package(name.as_bytes())
             .map_err(|e| format!("Failed to reclaim key package from server: {e}"))?;
 
         // Build a proposal with this key package and do the MLS bits.
@@ -1326,23 +1184,11 @@ impl User {
         self.auth_token.as_ref()
     }
 
-    fn committer_name(&self, cred: &Credential, mls_group: &MlsGroup) -> String {
+    fn committer_name(&self, cred: &Credential) -> String {
         let Ok(basic) = BasicCredential::try_from(cred.clone()) else {
             return "Unknown".to_string();
         };
-        let id = basic.identity();
-        if let Some(c) = self.contacts.get(id) {
-            return String::from_utf8_lossy(&c.id).to_string();
-        }
-        mls_group
-            .members()
-            .find_map(|m| {
-                BasicCredential::try_from(m.credential.clone())
-                    .ok()
-                    .filter(|mc| mc.identity() == id)
-                    .map(|mc| String::from_utf8_lossy(mc.identity()).to_string())
-            })
-            .unwrap_or_else(|| String::from_utf8_lossy(id).to_string())
+        String::from_utf8_lossy(basic.identity()).to_string()
     }
 
     fn create_commit_message(
@@ -1351,7 +1197,7 @@ impl User {
         mls_group: &MlsGroup,
         committer_cred: &Credential,
     ) -> ConversationMessage {
-        let committer = self.committer_name(committer_cred, mls_group);
+        let committer = self.committer_name(committer_cred);
         let explanations: Vec<_> = commit
             .queued_proposals()
             .map(|p| format_proposal_explanation(p, mls_group))

@@ -8,7 +8,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::types::SignatureScheme;
 use openmls_traits::OpenMlsProvider;
-use tls_codec::{TlsByteVecU8, TlsVecU16};
+use tls_codec::{TlsByteVecU8, TlsVecU16, TlsVecU32};
 use tower::ServiceExt;
 
 fn generate_credential(
@@ -43,25 +43,8 @@ async fn body_bytes(response: axum::response::Response) -> Bytes {
 }
 
 #[tokio::test]
-async fn test_list_clients() {
+async fn test_client_registration_and_key_packages() {
     let app = app(Arc::new(DsData::default()));
-
-    // There is no client. So the response body is empty.
-    let req = Request::get("/clients/list").body(Body::empty()).unwrap();
-
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let bytes = body_bytes(response).await;
-    let client_info =
-        TlsVecU32::<ClientInfo>::tls_deserialize(&mut bytes.as_ref()).expect("Invalid client list");
-
-    let expected = TlsVecU32::<ClientInfo>::new(vec![]);
-
-    assert_eq!(
-        client_info.tls_serialize_detached().unwrap(),
-        expected.tls_serialize_detached().unwrap()
-    );
 
     // Add a client.
     let client_name = "Client1";
@@ -87,7 +70,6 @@ async fn test_list_clients() {
             .to_vec(),
         KeyPackageIn::from(client_key_package.clone()),
     )];
-    let mut client_data = ClientInfo::new(client_key_package.clone());
     let body = RegisterClientRequest {
         key_packages: ClientKeyPackages(
             client_key_package
@@ -105,26 +87,8 @@ async fn test_list_clients() {
 
     let response = app.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let response_body =
+    let _response_body =
         RegisterClientSuccessResponse::tls_deserialize_exact(body_bytes(response).await).unwrap();
-    client_data.auth_token = response_body.auth_token;
-
-    // There should be Client1 now.
-    let req = Request::get("/clients/list").body(Body::empty()).unwrap();
-
-    let response = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let bytes = body_bytes(response).await;
-    let client_ids =
-        TlsVecU32::<Vec<u8>>::tls_deserialize(&mut bytes.as_ref()).expect("Invalid client list");
-
-    let expected = TlsVecU32::<Vec<u8>>::new(vec![client_data.id().to_vec()]);
-
-    assert_eq!(
-        client_ids.tls_serialize_detached().unwrap(),
-        expected.tls_serialize_detached().unwrap()
-    );
 
     // Get Client1 key packages.
     let path = "/clients/key_packages/".to_owned()
