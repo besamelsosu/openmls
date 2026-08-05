@@ -104,7 +104,6 @@ pub struct User {
     backend: Backend,
     #[serde(skip)]
     provider: OpenMlsRustPersistentCrypto,
-    autosave_enabled: bool,
     auth_token: Option<AuthToken>,
 }
 
@@ -124,7 +123,6 @@ impl User {
             identity: RefCell::new(Identity::new(CIPHERSUITE, &crypto, username.as_bytes())),
             backend: Backend::default(),
             provider: crypto,
-            autosave_enabled: false,
             auth_token: None,
         };
         out.persist_metadata()?;
@@ -216,7 +214,6 @@ impl User {
             identity: RefCell::new(identity),
             backend: Backend::default(),
             provider,
-            autosave_enabled: false,
             auth_token,
         };
 

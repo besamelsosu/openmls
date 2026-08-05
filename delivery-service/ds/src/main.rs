@@ -88,8 +88,8 @@ fn bytes_to_display(bytes: &[u8]) -> String {
 
 // === API ===
 
-/// Registering a new client takes a serialised `ClientInfo` object and returns
-/// a simple "Welcome {client name}" on success.
+/// Registering a new client takes a serialised `RegisterClientRequest` and
+/// returns an authentication token on success.
 /// An HTTP conflict (409) is returned if a client with this name exists
 /// already.
 async fn register_client(State(data): State<Arc<DsData>>, body: Bytes) -> Response {

@@ -3,7 +3,7 @@
 //! This library provides structs and necessary implementations to interact with
 //! the OpenMLS DS.
 //!
-//! Clients are represented by the `ClientInfo` struct.
+//! The delivery service stores clients internally as `ClientInfo` values.
 
 pub mod messages;
 
@@ -13,55 +13,16 @@ use messages::AuthToken;
 use openmls::prelude::tls_codec::*;
 use openmls::prelude::*;
 
-/// Information about a client.
-/// To register a new client create a new `ClientInfo` and send it to
-/// `/clients/register`.
-#[derive(Debug, Default, Clone, TlsSize, TlsSerialize, TlsDeserialize)]
+/// Internal delivery-service state for a client.
+#[derive(Debug)]
 pub struct ClientInfo {
     pub id: Vec<u8>,
     pub key_packages: ClientKeyPackages,
     /// map of reserved key_packages [group_id, key_package_hash]
-    #[tls_codec(with = "hashset_codec")]
     pub reserved_key_pkg_hash: HashSet<Vec<u8>>,
     pub msgs: Vec<MlsMessageIn>,
     pub welcome_queue: Vec<MlsMessageIn>,
     pub auth_token: AuthToken,
-}
-
-mod hashset_codec {
-    use std::{
-        collections::HashSet,
-        io::{Read, Write},
-    };
-
-    use crate::tls_codec::{self, Deserialize, Serialize};
-
-    pub fn tls_serialized_len(hashset: &HashSet<Vec<u8>>) -> usize {
-        let hashset_len = hashset.len();
-        let length_encoding_bytes = match hashset_len {
-            0..=0x3f => 1,
-            0x40..=0x3fff => 2,
-            0x4000..=0x3fff_ffff => 4,
-            _ => 8,
-        };
-        hashset_len + length_encoding_bytes
-    }
-
-    pub fn tls_serialize<W>(
-        hashset: &HashSet<Vec<u8>>,
-        writer: &mut W,
-    ) -> Result<usize, tls_codec::Error>
-    where
-        W: Write,
-    {
-        let vec = hashset.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
-        vec.tls_serialize(writer)
-    }
-
-    pub fn tls_deserialize<R: Read>(bytes: &mut R) -> Result<HashSet<Vec<u8>>, tls_codec::Error> {
-        let vec = Vec::<Vec<u8>>::tls_deserialize(bytes)?;
-        Ok(vec.into_iter().collect::<HashSet<_>>())
-    }
 }
 
 /// The DS returns a list of key packages for a client as `ClientKeyPackages`.
@@ -108,10 +69,6 @@ impl ClientInfo {
     /// Mark the key package hash ref as "reserved key package"
     /// The reserved hash ref will be used in DS::send_welcome and removed once welcome is distributed
     pub fn consume_kp(&mut self) -> Result<KeyPackageIn, String> {
-        if self.key_packages.0.len() <= 1 {
-            // We keep one keypackage to handle ClientInfo serialization/deserialization issues
-            return Err("No more keypackage available".to_string());
-        }
         match self.key_packages.0.pop() {
             Some(c) => {
                 self.reserved_key_pkg_hash.insert(c.0.into_vec());
