@@ -20,6 +20,22 @@ pub struct Identity {
 }
 
 impl Identity {
+    fn build_key_package(
+        ciphersuite: Ciphersuite,
+        crypto: &OpenMlsRustPersistentCrypto,
+        signer: &SignatureKeyPair,
+        credential_with_key: &CredentialWithKey,
+    ) -> KeyPackageBundle {
+        let capabilities = Capabilities::builder()
+            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
+            .build();
+
+        KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
+            .build(ciphersuite, crypto, signer, credential_with_key.clone())
+            .unwrap()
+    }
+
     pub(crate) fn new(
         ciphersuite: Ciphersuite,
         crypto: &OpenMlsRustPersistentCrypto,
@@ -33,30 +49,18 @@ impl Identity {
         };
         signature_keys.store(crypto.storage()).unwrap();
 
-        let capabilities = Capabilities::builder()
-            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
-            .build();
+        let key_package =
+            Self::build_key_package(ciphersuite, crypto, &signature_keys, &credential_with_key);
 
-        let key_package = KeyPackage::builder()
-            .leaf_node_capabilities(capabilities)
-            .build(
-                ciphersuite,
-                crypto,
-                &signature_keys,
-                credential_with_key.clone(),
-            )
-            .unwrap();
+        let hash_ref = key_package
+            .key_package()
+            .hash_ref(crypto.crypto())
+            .unwrap()
+            .as_slice()
+            .to_vec();
 
         Self {
-            kp: HashMap::from([(
-                key_package
-                    .key_package()
-                    .hash_ref(crypto.crypto())
-                    .unwrap()
-                    .as_slice()
-                    .to_vec(),
-                key_package.key_package().clone(),
-            )]),
+            kp: HashMap::from([(hash_ref, key_package.key_package().clone())]),
             credential_with_key,
             signer: signature_keys,
         }
@@ -68,29 +72,17 @@ impl Identity {
         ciphersuite: Ciphersuite,
         crypto: &OpenMlsRustPersistentCrypto,
     ) -> KeyPackage {
-        let capabilities = Capabilities::builder()
-            .extensions(vec![ExtensionType::Unknown(ADMIN_LIST_EXT_TYPE)])
-            .build();
+        let key_package =
+            Self::build_key_package(ciphersuite, crypto, &self.signer, &self.credential_with_key);
 
-        let key_package = KeyPackage::builder()
-            .leaf_node_capabilities(capabilities)
-            .build(
-                ciphersuite,
-                crypto,
-                &self.signer,
-                self.credential_with_key.clone(),
-            )
-            .unwrap();
+        let hash_ref = key_package
+            .key_package()
+            .hash_ref(crypto.crypto())
+            .unwrap()
+            .as_slice()
+            .to_vec();
 
-        self.kp.insert(
-            key_package
-                .key_package()
-                .hash_ref(crypto.crypto())
-                .unwrap()
-                .as_slice()
-                .to_vec(),
-            key_package.key_package().clone(),
-        );
+        self.kp.insert(hash_ref, key_package.key_package().clone());
         key_package.key_package().clone()
     }
 
@@ -99,10 +91,8 @@ impl Identity {
         self.credential_with_key.credential.serialized_content()
     }
 
-    /// Get the plain identity as byte vector.
+    /// Get the plain identity as string.
     pub fn identity_as_string(&self) -> String {
-        std::str::from_utf8(self.credential_with_key.credential.serialized_content())
-            .unwrap()
-            .to_string()
+        String::from_utf8_lossy(self.identity()).to_string()
     }
 }

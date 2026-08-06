@@ -1,8 +1,7 @@
 use openmls::extensions::{Extension, UnknownExtension};
-use openmls::prelude::Credential;
-use tls_codec::{Deserialize, Serialize, TlsDeserialize, TlsSerialize, TlsSize};
-
+use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
+use tls_codec::{TlsDeserialize, TlsSerialize, TlsSize};
 
 /// Custom Extension Type ID for the Admin List.
 /// Assigned from the MLS Private Use range (0xFF00 - 0xFFFF).
@@ -25,8 +24,6 @@ impl AdminListExtension {
         let mut extension_data = Vec::new();
         self.tls_serialize(&mut extension_data)?;
 
-        // FIX: Pass the raw `Vec<u8>` directly into `UnknownExtension`.
-        // No intermediate `VLBytes` casting required!
         Ok(Extension::Unknown(
             ADMIN_LIST_EXT_TYPE,
             UnknownExtension(extension_data),
@@ -36,18 +33,13 @@ impl AdminListExtension {
     /// Parses an AdminListExtension from an OpenMLS `Extension`.
     pub fn from_extension(extension: &Extension) -> Result<Self, tls_codec::Error> {
         match extension {
-            Extension::Unknown(ext_type, unknown_ext) => {
-                if *ext_type == ADMIN_LIST_EXT_TYPE {
-                    // Since `unknown_ext.0` is a raw `Vec<u8>`, `.as_slice()`
-                    // cleanly gives us the `&[u8]` required for the deserializer.
-                    let mut slice = unknown_ext.0.as_slice();
-                    Self::tls_deserialize(&mut slice)
-                } else {
-                    Err(tls_codec::Error::DecodingError(
-                        "Extension type mismatch for AdminListExtension".to_string(),
-                    ))
-                }
+            Extension::Unknown(ext_type, unknown_ext) if *ext_type == ADMIN_LIST_EXT_TYPE => {
+                let mut slice = unknown_ext.0.as_slice();
+                Self::tls_deserialize(&mut slice)
             }
+            Extension::Unknown(_, _) => Err(tls_codec::Error::DecodingError(
+                "Extension type mismatch for AdminListExtension".to_string(),
+            )),
             _ => Err(tls_codec::Error::DecodingError(
                 "Expected Unknown extension variant for custom AdminListExtension".to_string(),
             )),
@@ -56,11 +48,9 @@ impl AdminListExtension {
 
     /// Finds and parses an `AdminListExtension` from `Extensions<GroupContext>`.
     pub fn find_in_extensions(extensions: &Extensions<GroupContext>) -> Result<Self, String> {
-        for ext in extensions.iter() {
-            if let Ok(admin_list) = Self::from_extension(ext) {
-                return Ok(admin_list);
-            }
-        }
-        Err("Group context extension for admin list is missing".to_string())
+        extensions
+            .iter()
+            .find_map(|ext| Self::from_extension(ext).ok())
+            .ok_or_else(|| "Group context extension for admin list is missing".to_string())
     }
 }

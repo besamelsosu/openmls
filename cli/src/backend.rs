@@ -50,15 +50,12 @@ impl Backend {
     /// Get and reserve a key package for a client.
     pub fn consume_key_package(&self, client_id: &[u8]) -> Result<KeyPackageIn, String> {
         let mut url = self.ds_url.clone();
-        let path = "/clients/key_package/".to_string()
-            + &base64::engine::general_purpose::URL_SAFE.encode(client_id);
-        url.set_path(&path);
+        let encoded_id = base64::engine::general_purpose::URL_SAFE.encode(client_id);
+        url.set_path(&format!("/clients/key_package/{encoded_id}"));
 
         let response = get(&url)?;
-        match KeyPackageIn::tls_deserialize(&mut response.as_slice()) {
-            Ok(kp) => Ok(kp),
-            Err(e) => Err(format!("Error decoding server response: {e:?}")),
-        }
+        KeyPackageIn::tls_deserialize(&mut response.as_slice())
+            .map_err(|e| format!("Error decoding server response: {e:?}"))
     }
 
     /// Publish client additional key packages
@@ -67,9 +64,9 @@ impl Backend {
             return Err("Please register user before publishing key packages".to_string());
         };
         let mut url = self.ds_url.clone();
-        let path = "/clients/key_packages/".to_string()
-            + &base64::engine::general_purpose::URL_SAFE.encode(user.identity.borrow().identity());
-        url.set_path(&path);
+        let encoded_id =
+            base64::engine::general_purpose::URL_SAFE.encode(user.identity.borrow().identity());
+        url.set_path(&format!("/clients/key_packages/{encoded_id}"));
 
         let request = PublishKeyPackagesRequest {
             key_packages: ckp,
@@ -107,26 +104,25 @@ impl Backend {
             return Err("Please register user before publishing key packages".to_string());
         };
         let mut url = self.ds_url.clone();
-        let path = "/recv/".to_string()
-            + &base64::engine::general_purpose::URL_SAFE.encode(user.identity.borrow().identity());
-        url.set_path(&path);
+        let encoded_id =
+            base64::engine::general_purpose::URL_SAFE.encode(user.identity.borrow().identity());
+        url.set_path(&format!("/recv/{encoded_id}"));
 
         let request = RecvMessageRequest {
             auth_token: auth_token.clone(),
         };
 
         let response = get_with_body(&url, &request)?;
-        match TlsVecU16::<MlsMessageIn>::tls_deserialize(&mut response.as_slice()) {
-            Ok(r) => Ok(r.into()),
-            Err(e) => Err(format!("Invalid message list: {e:?}")),
-        }
+        TlsVecU16::<MlsMessageIn>::tls_deserialize(&mut response.as_slice())
+            .map(|r| r.into())
+            .map_err(|e| format!("Invalid message list: {e:?}"))
     }
 
     /// Reset the DS.
     pub fn reset_server(&self) {
         let mut url = self.ds_url.clone();
         url.set_path("reset");
-        get(&url).unwrap();
+        let _ = get(&url);
     }
 }
 

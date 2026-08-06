@@ -22,9 +22,8 @@ impl Conversation {
     /// The function returns the `last_n` messages.
     #[allow(dead_code)]
     pub fn get(&self, last_n: usize) -> Option<&[ConversationMessage]> {
-        let num_messages = self.messages.len();
-        let start = num_messages.saturating_sub(last_n);
-        self.messages.get(start..num_messages)
+        let start = self.messages.len().saturating_sub(last_n);
+        self.messages.get(start..)
     }
 }
 

@@ -1,7 +1,6 @@
-use std::collections::HashSet;
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str,
 };
 
@@ -94,15 +93,11 @@ impl Group {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct User {
-    #[serde(skip)]
     pub(crate) groups: RefCell<HashMap<String, Group>>,
     group_list: HashSet<String>,
     pub(crate) identity: RefCell<Identity>,
-    #[serde(skip)]
     backend: Backend,
-    #[serde(skip)]
     provider: OpenMlsRustPersistentCrypto,
     auth_token: Option<AuthToken>,
 }
@@ -253,16 +248,11 @@ impl User {
     /// Get a member
     fn find_member_index(&self, name: String, group: &Group) -> Result<LeafNodeIndex, String> {
         let mls_group = group.mls_group.borrow();
-        for Member {
-            index,
-            encryption_key: _,
-            signature_key: _,
-            credential,
-        } in mls_group.members()
-        {
-            let credential = BasicCredential::try_from(credential).unwrap();
-            if credential.identity() == name.as_bytes() {
-                return Ok(index);
+        for member in mls_group.members() {
+            if let Ok(credential) = BasicCredential::try_from(member.credential) {
+                if credential.identity() == name.as_bytes() {
+                    return Ok(member.index);
+                }
             }
         }
         Err("Unknown member".to_string())
@@ -292,8 +282,9 @@ impl User {
         let mls_group = group.mls_group.borrow();
         let mut member_names = Vec::new();
         for member in mls_group.members() {
-            let credential = BasicCredential::try_from(member.credential).unwrap();
-            member_names.push(String::from_utf8(credential.identity().to_vec()).unwrap());
+            if let Ok(credential) = BasicCredential::try_from(member.credential) {
+                member_names.push(String::from_utf8_lossy(credential.identity()).to_string());
+            }
         }
         member_names.sort();
         Ok(member_names)
@@ -305,8 +296,9 @@ impl User {
 
         let mut admin_names = Vec::new();
         for admin_cred in &admin_list.admins {
-            let basic_cred = BasicCredential::try_from(admin_cred.clone()).unwrap();
-            admin_names.push(String::from_utf8(basic_cred.identity().to_vec()).unwrap());
+            if let Ok(basic_cred) = BasicCredential::try_from(admin_cred.clone()) {
+                admin_names.push(String::from_utf8_lossy(basic_cred.identity()).to_string());
+            }
         }
         admin_names.sort();
         Ok(admin_names)
@@ -339,27 +331,22 @@ impl User {
         let mut recipients = Vec::new();
 
         let mls_group = group.mls_group.borrow();
-        for Member {
-            index: _,
-            encryption_key: _,
-            signature_key,
-            credential,
-        } in mls_group.members()
-        {
+        for member in mls_group.members() {
             if self
                 .identity
                 .borrow()
                 .credential_with_key
                 .signature_key
                 .as_slice()
-                != signature_key.as_slice()
+                != member.signature_key.as_slice()
             {
-                let credential = BasicCredential::try_from(credential).unwrap();
-                log::debug!(
-                    "Adding group member {:?} as recipient",
-                    String::from_utf8_lossy(credential.identity())
-                );
-                recipients.push(credential.identity().to_vec());
+                if let Ok(credential) = BasicCredential::try_from(member.credential) {
+                    log::debug!(
+                        "Adding group member {:?} as recipient",
+                        String::from_utf8_lossy(credential.identity())
+                    );
+                    recipients.push(credential.identity().to_vec());
+                }
             }
         }
         recipients
@@ -441,10 +428,10 @@ impl User {
         ),
         String,
     > {
-        let processed_message: ProcessedMessage;
         let mut groups = self.groups.borrow_mut();
 
-        let group = match groups.get_mut(str::from_utf8(message.group_id().as_slice()).unwrap()) {
+        let group_id_str = String::from_utf8_lossy(message.group_id().as_slice()).to_string();
+        let group = match groups.get_mut(&group_id_str) {
             Some(g) => g,
             None => {
                 log::error!(
@@ -456,7 +443,7 @@ impl User {
         };
         let mut mls_group = group.mls_group.borrow_mut();
 
-        processed_message = match mls_group.process_message(&self.provider, message) {
+        let processed_message = match mls_group.process_message(&self.provider, message) {
             Ok(msg) => msg,
             Err(e) => {
                 log::error!("Error processing unverified message: {e:?} -  Dropping message.");
@@ -468,17 +455,14 @@ impl User {
 
         let message_out = match processed_message.into_content() {
             ProcessedMessageContent::ApplicationMessage(application_message) => {
-                let processed_message_credential =
-                    BasicCredential::try_from(processed_message_credential.clone()).unwrap();
-                let sender_name = processed_message_credential.identity().to_vec();
-                let conversation_message = ConversationMessage::new(
-                    String::from_utf8(application_message.into_bytes())
-                        .unwrap()
-                        .clone(),
-                    String::from_utf8(sender_name).unwrap(),
-                );
+                let sender_name = BasicCredential::try_from(processed_message_credential)
+                    .map(|c| String::from_utf8_lossy(c.identity()).to_string())
+                    .unwrap_or_else(|_| "Unknown".to_string());
+                let message_text =
+                    String::from_utf8_lossy(&application_message.into_bytes()).to_string();
+                let conversation_message = ConversationMessage::new(message_text, sender_name);
                 group.conversation.add(conversation_message.clone());
-                if group_name.is_none() || group_name.clone().unwrap() == group.group_name {
+                if group_name.is_none() || group_name.as_deref() == Some(&group.group_name) {
                     Some(conversation_message)
                 } else {
                     None
@@ -747,6 +731,10 @@ impl User {
 
     /// Create a group with the given name.
     pub fn create_group(&mut self, name: String) -> Result<(), String> {
+        if self.groups.borrow().contains_key(&name) {
+            return Err(format!("Group '{name}' already exists"));
+        }
+
         log::debug!("{} creates group {}", self.username(), name);
         let group_id = name.as_bytes();
 
@@ -791,7 +779,7 @@ impl User {
             GroupId::from_slice(group_id),
             self.identity.borrow().credential_with_key.clone(),
         )
-        .expect("Failed to create MlsGroup");
+        .map_err(|e| format!("Failed to create MlsGroup: {e:?}"))?;
 
         let group = Group {
             group_name: name.clone(),
@@ -799,12 +787,7 @@ impl User {
             mls_group: RefCell::new(mls_group),
         };
 
-        if self.groups.borrow().contains_key(&name) {
-            panic!("Group '{name}' existed already");
-        }
-
         self.groups.borrow_mut().insert(name.clone(), group);
-
         self.group_list.insert(name);
         self.persist_metadata()?;
         Ok(())
@@ -1151,7 +1134,7 @@ impl User {
 
         let group_id = mls_group.group_id().to_vec();
         // XXX: Use Welcome's encrypted_group_info field to store group_name.
-        let group_name = String::from_utf8(group_id.clone()).unwrap();
+        let group_name = String::from_utf8_lossy(&group_id).to_string();
 
         let group = Group {
             group_name: group_name.clone(),

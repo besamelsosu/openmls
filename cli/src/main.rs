@@ -5,7 +5,7 @@
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::env;
-use std::io::{stdout, Write};
+use std::io::stdout;
 
 mod admin_list_gce;
 mod backend;
@@ -18,32 +18,121 @@ mod user;
 
 const HELP: &str = "
  >>> Available commands:
- >>>     - create group {group name}    create a new group
- >>>     - create kp                    create a new key package
- >>>     - exit                         exit the CLI
- >>>     - group {group name}           enter group submenu for operations
- >>>     - help                         print this help message
- >>>     - info                         show current user details
- >>>     - load {client name}           load the client state as a new client
- >>>     - register {client name}       register a new client
- >>>     - reset                        reset the server
- >>>     - update                       update the client state
+     - create group {group name}    create a new group
+     - create kp                    create a new key package
+     - exit                         exit the CLI
+     - group {group name}           enter group submenu for operations
+     - help                         print this help message
+     - info                         show current user details
+     - load {client name}           load the client state as a new client
+     - register {client name}       register a new client
+     - reset                        reset the server
+     - update                       update the client state
 ";
 
 const GROUP_HELP: &str = "
  >>> Group submenu commands:
- >>>     - demote {client name}         demote a user from admin
- >>>     - exit                         leave the group submenu
- >>>     - help                         print this group help message
- >>>     - info                         show details for the current group
- >>>     - invite {client name}         invite a user to the group
- >>>     - leave                        leave the group
- >>>     - promote {client name}        promote a user to admin
- >>>     - read                         read messages sent to the group
- >>>     - remove {client name}         remove a user from the group
- >>>     - send {message}               send a message to the group
- >>>     - update                       update the client state for the group
+     - demote {client name}         demote a user from admin
+     - exit                         leave the group submenu
+     - help                         print this group help message
+     - info                         show details for the current group
+     - invite {client name}         invite a user to the group
+     - leave                        leave the group
+     - promote {client name}        promote a user to admin
+     - read                         read messages sent to the group
+     - remove {client name}         remove a user from the group
+     - send {message}               send a message to the group
+     - update                       update the client state for the group
 ";
+
+enum Command {
+    Register(String),
+    Load(String),
+    CreateKp,
+    CreateGroup(String),
+    Group(String),
+    Info,
+    Update,
+    Reset,
+    Help,
+    Exit,
+    Unknown,
+}
+
+impl Command {
+    fn parse(input: &str) -> Self {
+        let input = input.trim();
+        if let Some(name) = input.strip_prefix("register ") {
+            Self::Register(name.trim().to_string())
+        } else if let Some(name) = input.strip_prefix("load ") {
+            Self::Load(name.trim().to_string())
+        } else if input == "create kp" {
+            Self::CreateKp
+        } else if let Some(group) = input.strip_prefix("create group ") {
+            Self::CreateGroup(group.trim().to_string())
+        } else if let Some(group) = input.strip_prefix("group ") {
+            Self::Group(group.trim().to_string())
+        } else if input == "info" {
+            Self::Info
+        } else if input == "update" {
+            Self::Update
+        } else if input == "reset" {
+            Self::Reset
+        } else if input == "help" {
+            Self::Help
+        } else if input == "exit" {
+            Self::Exit
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+enum GroupCommand {
+    Send(String),
+    Invite(String),
+    Remove(String),
+    Promote(String),
+    Demote(String),
+    Leave,
+    Read,
+    Help,
+    Info,
+    Update,
+    Exit,
+    Unknown,
+}
+
+impl GroupCommand {
+    fn parse(input: &str) -> Self {
+        let input = input.trim();
+        if let Some(msg) = input.strip_prefix("send ") {
+            Self::Send(msg.trim().to_string())
+        } else if let Some(name) = input.strip_prefix("invite ") {
+            Self::Invite(name.trim().to_string())
+        } else if let Some(name) = input.strip_prefix("remove ") {
+            Self::Remove(name.trim().to_string())
+        } else if let Some(name) = input.strip_prefix("promote ") {
+            Self::Promote(name.trim().to_string())
+        } else if let Some(name) = input.strip_prefix("demote ") {
+            Self::Demote(name.trim().to_string())
+        } else if input == "leave" {
+            Self::Leave
+        } else if input == "read" {
+            Self::Read
+        } else if input == "help" {
+            Self::Help
+        } else if input == "info" {
+            Self::Info
+        } else if input == "update" {
+            Self::Update
+        } else if input == "exit" {
+            Self::Exit
+        } else {
+            Self::Unknown
+        }
+    }
+}
 
 fn print_help(help_text: &str) {
     print!("{help_text}");
@@ -90,21 +179,102 @@ fn print_group_info(client: &user::User, group_name: &str) {
 }
 
 fn update(client: &mut user::User, group_id: Option<String>) {
-    let messages = client.update(group_id).unwrap();
-    println!(" >>> Updated client :)");
-    if !messages.is_empty() {
-        println!("     New messages:");
+    match client.update(group_id) {
+        Ok(messages) => {
+            println!(" >>> Updated client :)");
+            if !messages.is_empty() {
+                println!("     New messages:");
+            }
+            messages.iter().for_each(|cm| {
+                println!("         {0} from {1}", cm.message, cm.author);
+            });
+        }
+        Err(e) => eprintln!(" >>> Error updating client: {e}"),
     }
-    messages.iter().for_each(|cm| {
-        println!("         {0} from {1}", cm.message, cm.author);
-    });
+}
+
+fn handle_group_loop(rl: &mut DefaultEditor, client: &mut user::User, group_name: &str) {
+    let prompt = format!("{group_name} >>> ");
+    loop {
+        let line = match rl.readline(&prompt) {
+            Ok(line) => {
+                let line = line.trim().to_owned();
+                if !line.is_empty() {
+                    let _ = rl.add_history_entry(line.as_str());
+                }
+                line
+            }
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => {
+                println!(">>> Leaving group");
+                break;
+            }
+            Err(err) => {
+                eprintln!("readline error: {err}");
+                break;
+            }
+        };
+
+        match GroupCommand::parse(&line) {
+            GroupCommand::Send(msg) => match client.send_msg(&msg, group_name.to_string()) {
+                Ok(()) => println!("sent message to {group_name}"),
+                Err(e) => eprintln!("Error sending group message: {e:?}"),
+            },
+            GroupCommand::Invite(new_client) => {
+                match client.invite(new_client.clone(), group_name.to_string()) {
+                    Ok(()) => println!("added {new_client} to group {group_name}"),
+                    Err(e) => eprintln!("Error inviting user: {e}"),
+                }
+            }
+            GroupCommand::Remove(rem_client) => {
+                match client.remove(rem_client.clone(), group_name.to_string()) {
+                    Ok(()) => println!("Removed {rem_client} from group {group_name}"),
+                    Err(e) => eprintln!("Error removing user: {e}"),
+                }
+            }
+            GroupCommand::Promote(promote_client) => {
+                match client.promote(promote_client.clone(), group_name.to_string()) {
+                    Ok(()) => {
+                        println!("Promoted {promote_client} to admin in group {group_name}")
+                    }
+                    Err(e) => eprintln!("Error promoting user: {e}"),
+                }
+            }
+            GroupCommand::Demote(demote_client) => {
+                match client.demote(demote_client.clone(), group_name.to_string()) {
+                    Ok(()) => {
+                        println!("Demoted {demote_client} from admin in group {group_name}")
+                    }
+                    Err(e) => eprintln!("Error demoting user: {e}"),
+                }
+            }
+            GroupCommand::Leave => match client.leave(group_name.to_string()) {
+                Ok(()) => println!("Left group {group_name}"),
+                Err(e) => eprintln!("Error leaving group: {e}"),
+            },
+            GroupCommand::Read => match client.read_msgs(group_name.to_string()) {
+                Ok(Some(messages)) => {
+                    println!("{group_name} has received {} messages", messages.len());
+                }
+                _ => println!("{group_name} has no messages"),
+            },
+            GroupCommand::Help => print_help(GROUP_HELP),
+            GroupCommand::Info => print_group_info(client, group_name),
+            GroupCommand::Update => update(client, Some(group_name.to_string())),
+            GroupCommand::Exit => {
+                println!(" >>> Leaving group");
+                break;
+            }
+            GroupCommand::Unknown => println!(" >>> Unknown group command :("),
+        }
+    }
 }
 
 fn main() {
     pretty_env_logger::init();
 
     let stdout = stdout();
-    let mut stdout = stdout.lock();
+    let mut _stdout = stdout.lock();
     let mut rl = DefaultEditor::new().unwrap();
     let history_path = env::temp_dir().join("openmls").join(".openmls_history.txt");
     let _ = rl.load_history(&history_path);
@@ -113,40 +283,28 @@ fn main() {
     let mut client = None;
 
     loop {
-        stdout.flush().unwrap();
-
-        let op = match rl.readline(">>> ") {
+        let line = match rl.readline(">>> ") {
             Ok(line) => {
                 let line = line.trim().to_owned();
-
                 if !line.is_empty() {
                     let _ = rl.add_history_entry(line.as_str());
                 }
-
                 line
             }
-
-            Err(ReadlineError::Interrupted) => {
-                continue;
-            }
-
+            Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => {
                 let _ = rl.save_history(&history_path);
                 println!("\n >>> Goodbye!");
                 break;
             }
-
             Err(err) => {
                 eprintln!("readline error: {err}");
                 break;
             }
         };
 
-        // Register a client.
-        // There's no persistence. So once the client app stops you have to
-        // register a new client.
-        if let Some(client_name) = op.strip_prefix("register ") {
-            match user::User::new(client_name.to_string()) {
+        match Command::parse(&line) {
+            Command::Register(client_name) => match user::User::new(client_name.clone()) {
                 Ok(mut user) => {
                     user.add_key_package();
                     user.add_key_package();
@@ -155,243 +313,64 @@ fn main() {
                             println!("registered new client {client_name}");
                             client = Some(user);
                         }
-                        Err(e) => {
-                            eprintln!("Error registering client {client_name} : {e}");
-                        }
+                        Err(e) => eprintln!("Error registering client {client_name} : {e}"),
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error creating client {client_name} : {e}");
-                }
-            }
-            continue;
-        }
-
-        if let Some(client_name) = op.strip_prefix("load ") {
-            match user::User::load(client_name.to_string()) {
+                Err(e) => eprintln!("Error creating client {client_name} : {e}"),
+            },
+            Command::Load(client_name) => match user::User::load(client_name.clone()) {
                 Ok(user) => {
                     client = Some(user);
                     println!("recovered client {client_name}");
                 }
                 Err(e) => eprintln!("Error recovering client {client_name} : {e}"),
-            }
-            continue;
-        }
-
-        // Create a new KeyPackage.
-        if op == "create kp" {
-            if let Some(client) = &mut client {
-                client.create_kp();
-                println!(" >>> New key package created");
-            } else {
-                println!(" >>> No client to update :(");
-            }
-            continue;
-        }
-
-        // Create a new group.
-        if let Some(group_name) = op.strip_prefix("create group ") {
-            if let Some(client) = &mut client {
-                match client.create_group(group_name.to_string()) {
-                    Ok(()) => {
-                        println!(" >>> Created group {group_name} :)");
-                    }
-                    Err(e) => {
-                        println!("Error creating group {group_name} : {e}");
-                    }
+            },
+            Command::CreateKp => {
+                if let Some(c) = &mut client {
+                    c.create_kp();
+                    println!(" >>> New key package created");
+                } else {
+                    println!(" >>> No client to update :(");
                 }
-            } else {
-                println!(" >>> No client to create a group :(");
             }
-            continue;
-        }
-
-        // Group operations.
-        if let Some(group_name) = op.strip_prefix("group ") {
-            if let Some(client) = &mut client {
-                let prompt = format!("{group_name} >>> ");
-                loop {
-                    let op2 = match rl.readline(&prompt) {
-                        Ok(line) => {
-                            let line = line.trim().to_owned();
-
-                            if !line.is_empty() {
-                                let _ = rl.add_history_entry(line.as_str());
-                            }
-
-                            line
-                        }
-
-                        Err(ReadlineError::Interrupted) => {
-                            continue;
-                        }
-
-                        Err(ReadlineError::Eof) => {
-                            println!(">>> Leaving group");
-                            break;
-                        }
-
-                        Err(err) => {
-                            eprintln!("readline error: {err}");
-                            break;
-                        }
-                    };
-
-                    // Send a message to the group.
-                    if let Some(msg) = op2.strip_prefix("send ") {
-                        match client.send_msg(msg, group_name.to_string()) {
-                            Ok(()) => println!("sent message to {group_name}"),
-                            Err(e) => eprintln!("Error sending group message: {e:?}"),
-                        }
-                        continue;
+            Command::CreateGroup(group_name) => {
+                if let Some(c) = &mut client {
+                    match c.create_group(group_name.clone()) {
+                        Ok(()) => println!(" >>> Created group {group_name} :)"),
+                        Err(e) => println!("Error creating group {group_name} : {e}"),
                     }
-
-                    // Invite a client to the group.
-                    if let Some(new_client) = op2.strip_prefix("invite ") {
-                        match client.invite(new_client.to_string(), group_name.to_string()) {
-                            Ok(()) => {
-                                println!("added {new_client} to group {group_name}");
-                            }
-                            Err(e) => {
-                                eprintln!("Error inviting user: {e}");
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Remove a client from the group.
-                    if let Some(rem_client) = op2.strip_prefix("remove ") {
-                        match client.remove(rem_client.to_string(), group_name.to_string()) {
-                            Ok(()) => {
-                                println!("Removed {rem_client} from group {group_name}");
-                            }
-                            Err(e) => {
-                                eprintln!("Error removing user: {e}");
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Promote a client to admin.
-                    if let Some(promote_client) = op2.strip_prefix("promote ") {
-                        match client.promote(promote_client.to_string(), group_name.to_string()) {
-                            Ok(()) => {
-                                println!(
-                                    "Promoted {promote_client} to admin in group {group_name}"
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("Error promoting user: {e}");
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Demote a client from admin.
-                    if let Some(demote_client) = op2.strip_prefix("demote ") {
-                        match client.demote(demote_client.to_string(), group_name.to_string()) {
-                            Ok(()) => {
-                                println!(
-                                    "Demoted {demote_client} from admin in group {group_name}"
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("Error demoting user: {e}");
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Request to leave the group.
-                    if op2 == "leave" {
-                        match client.leave(group_name.to_string()) {
-                            Ok(()) => {
-                                println!("Left group {group_name}");
-                            }
-                            Err(e) => {
-                                eprintln!("Error leaving group: {e}");
-                            }
-                        }
-                        continue;
-                    }
-
-                    // Read messages sent to the group.
-                    if op2 == "read" {
-                        let messages = client.read_msgs(group_name.to_string()).unwrap();
-                        if let Some(messages) = messages {
-                            println!("{} has received {} messages", group_name, messages.len());
-                        } else {
-                            println!("{group_name} has no messages");
-                        }
-                        continue;
-                    }
-
-                    if op2 == "help" {
-                        print_help(&GROUP_HELP);
-                        continue;
-                    }
-
-                    if op2 == "info" {
-                        print_group_info(client, &group_name);
-                        continue;
-                    }
-
-                    // Update the client state.
-                    if op2 == "update" {
-                        update(client, Some(group_name.to_string()));
-                        continue;
-                    }
-
-                    // Exit group.
-                    if op2 == "exit" {
-                        println!(" >>> Leaving group");
-                        break;
-                    }
-
-                    println!(" >>> Unknown group command :(");
+                } else {
+                    println!(" >>> No client to create a group :(");
                 }
-            } else {
-                println!(" >>> No client :(");
             }
-            continue;
-        }
-
-        if op == "info" {
-            print_user_info(&client);
-            continue;
-        }
-
-        // Update the client state.
-        if op == "update" {
-            if let Some(client) = &mut client {
-                update(client, None);
-            } else {
-                println!(" >>> No client to update :(");
+            Command::Group(group_name) => {
+                if let Some(c) = &mut client {
+                    handle_group_loop(&mut rl, c, &group_name);
+                } else {
+                    println!(" >>> No client :(");
+                }
             }
-            continue;
+            Command::Info => print_user_info(&client),
+            Command::Update => {
+                if let Some(c) = &mut client {
+                    update(c, None);
+                } else {
+                    println!(" >>> No client to update :(");
+                }
+            }
+            Command::Reset => {
+                backend::Backend::default().reset_server();
+                client = None;
+                println!(" >>> Reset server :)");
+            }
+            Command::Help => print_help(HELP),
+            Command::Exit => {
+                let _ = rl.save_history(&history_path);
+                println!(" >>> Goodbye!");
+                break;
+            }
+            Command::Unknown => println!(" >>> unknown command :(\n >>> try help"),
         }
-
-        // Reset the server and client.
-        if op == "reset" {
-            backend::Backend::default().reset_server();
-            client = None;
-            println!(" >>> Reset server :)");
-            continue;
-        }
-
-        if op == "exit" {
-            let _ = rl.save_history(&history_path);
-            println!(" >>> Goodbye!");
-            break;
-        }
-
-        // Print help
-        if op == "help" {
-            print_help(HELP);
-            continue;
-        }
-
-        println!(" >>> unknown command :(\n >>> try help");
     }
 }
 
