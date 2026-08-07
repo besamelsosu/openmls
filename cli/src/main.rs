@@ -42,6 +42,7 @@ const GROUP_HELP: &str = "
      - read                         read messages sent to the group
      - remove {client name}         remove a user from the group
      - send {message}               send a message to the group
+     - self-update                  propose an update of your own leaf node
      - update                       update the client state for the group
 ";
 
@@ -95,6 +96,7 @@ enum GroupCommand {
     Promote(String),
     Demote(String),
     Leave,
+    SelfUpdate,
     Read,
     Help,
     Info,
@@ -118,6 +120,8 @@ impl GroupCommand {
             Self::Demote(name.trim().to_string())
         } else if input == "leave" {
             Self::Leave
+        } else if input == "self-update" {
+            Self::SelfUpdate
         } else if input == "read" {
             Self::Read
         } else if input == "help" {
@@ -251,6 +255,10 @@ fn handle_group_loop(rl: &mut DefaultEditor, client: &mut user::User, group_name
             GroupCommand::Leave => match client.leave(group_name.to_string()) {
                 Ok(()) => println!("Left group {group_name}"),
                 Err(e) => eprintln!("Error leaving group: {e}"),
+            },
+            GroupCommand::SelfUpdate => match client.self_update(group_name.to_string()) {
+                Ok(()) => println!("Proposed a self-update in group {group_name}"),
+                Err(e) => eprintln!("Error proposing self-update: {e}"),
             },
             GroupCommand::Read => match client.read_msgs(group_name.to_string()) {
                 Ok(Some(messages)) => {

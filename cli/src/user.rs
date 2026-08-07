@@ -82,6 +82,17 @@ impl Group {
         has_pending_removal
     }
 
+    /// Returns whether this group has a pending update proposal from this member.
+    pub fn has_pending_self_update(&self) -> bool {
+        let mls_group = self.mls_group.borrow();
+        let own_leaf_index = mls_group.own_leaf_index();
+        let has_pending_update = mls_group.pending_proposals().any(|queued| {
+            matches!(queued.proposal(), Proposal::Update(_))
+                && matches!(queued.sender(), Sender::Member(index) if *index == own_leaf_index)
+        });
+        has_pending_update
+    }
+
     /// Verifies that the given credential is an admin and has no pending self-removal.
     pub fn ensure_can_commit(&self, self_credential: &Credential) -> Result<(), String> {
         self.check_is_admin(self_credential)
@@ -489,26 +500,25 @@ impl User {
                 }
             }
             ProcessedMessageContent::ProposalMessage(proposal_ptr) => {
-                // Detect a self-remove (leave): sender leaf index == removed leaf index.
-                let is_self_remove = match proposal_ptr.proposal() {
+                // Self-removes and updates are member-requested operations that an
+                // admin is responsible for committing.
+                let is_admin_processed = match proposal_ptr.proposal() {
                     Proposal::Remove(remove_proposal) => match proposal_ptr.sender() {
                         Sender::Member(sender_leaf_index) => {
                             *sender_leaf_index == remove_proposal.removed()
                         }
                         _ => false,
                     },
+                    Proposal::Update(_) => true,
                     _ => false,
                 };
 
-                if !is_self_remove {
+                if !is_admin_processed {
                     return Ok((PostUpdateActions::None, None, None));
                 }
 
-                // Stage the proposal so it's available to commit later. We
-                // don't attempt to commit it here - `update` calls
-                // `try_resolve_pending_leaves` for every group once the
-                // whole batch of incoming messages has been processed; see
-                // that method for why.
+                // Stage the proposal so it's available to commit after the
+                // whole batch of incoming messages has been processed.
                 mls_group
                     .store_pending_proposal(self.provider.storage(), *proposal_ptr)
                     .map_err(|e| format!("Error storing pending proposal: {e}"))?;
@@ -576,7 +586,7 @@ impl User {
         Ok((PostUpdateActions::None, None, message_out))
     }
 
-    fn process_pending_leaves(&self, group: &Group) -> Result<(), String> {
+    fn process_pending_member_proposals(&self, group: &Group) -> Result<(), String> {
         let self_credential = self
             .identity
             .borrow()
@@ -589,17 +599,17 @@ impl User {
             return Ok(());
         }
 
-        let has_pending_removal = group
+        let has_pending_member_proposal = group
             .mls_group
             .borrow()
             .pending_proposals()
-            .any(|queued| matches!(queued.proposal(), Proposal::Remove(_)));
-        if !has_pending_removal {
+            .any(|queued| matches!(queued.proposal(), Proposal::Remove(_) | Proposal::Update(_)));
+        if !has_pending_member_proposal {
             return Ok(());
         }
 
         log::debug!(
-            "update::group {} has a pending leave proposal; admin {} is attempting to commit",
+            "update::group {} has pending member proposals; admin {} is attempting to commit",
             group.group_name,
             self.username(),
         );
@@ -636,14 +646,14 @@ impl User {
         match self.backend.send_msg(&msg) {
             Ok(()) => {
                 log::debug!(
-                    "update::leave commit sent successfully by admin {}",
+                    "update::member proposal commit sent successfully by admin {}",
                     self.username()
                 );
                 group
                     .mls_group
                     .borrow_mut()
                     .merge_pending_commit(&self.provider)
-                    .map_err(|e| format!("Error merging pending commit after leave: {e}"))?;
+                    .map_err(|e| format!("Error merging pending member proposal commit: {e}"))?;
 
                 // Strip removed members from the admin list now that the commit is confirmed.
                 for cred in &pending_removals {
@@ -652,7 +662,7 @@ impl User {
             }
             Err(e) => {
                 log::debug!(
-                    "update::Failed to send leave commit (another commit may have won): {e}. Clearing local pending commit."
+                    "update::Failed to send member proposal commit (another commit may have won): {e}. Clearing local pending commit."
                 );
                 if let Err(clear_err) = group
                     .mls_group
@@ -729,15 +739,13 @@ impl User {
         log::debug!("update::Processing messages done");
 
         // Now that the whole batch has been processed, give every group a
-        // chance to resolve any self-removal proposals it picked up along
-        // the way (see try_resolve_pending_leaves for why this happens here
-        // rather than inline per-message).
+        // chance to resolve member proposals it picked up along the way.
         {
             let groups = self.groups.borrow();
             for group in groups.values() {
-                if let Err(e) = self.process_pending_leaves(group) {
+                if let Err(e) = self.process_pending_member_proposals(group) {
                     log::error!(
-                        "update::Error processing pending leave proposals for group {}: {e}",
+                        "update::Error processing pending member proposals for group {}: {e}",
                         group.group_name
                     );
                 }
@@ -1137,6 +1145,46 @@ impl User {
 
         drop(groups);
 
+        self.persist_metadata()?;
+
+        Ok(())
+    }
+
+    /// Propose an update of this member's leaf node.
+    pub(crate) fn self_update(&self, group_name: String) -> Result<(), String> {
+        let mut groups = self.groups.borrow_mut();
+        let group = groups
+            .get_mut(&group_name)
+            .ok_or_else(|| format!("No group with name {group_name} known."))?;
+
+        if group.has_pending_self_removal() {
+            return Err(
+                "Cannot request a self-update while your removal from the group is pending."
+                    .to_string(),
+            );
+        }
+        if group.has_pending_self_update() {
+            return Err(
+                "You have already requested a self-update; waiting for an admin to commit it."
+                    .to_string(),
+            );
+        }
+
+        let (update_message, _proposal_ref) = group
+            .mls_group
+            .borrow_mut()
+            .propose_self_update(
+                &self.provider,
+                &self.identity.borrow().signer,
+                LeafNodeParameters::default(),
+            )
+            .map_err(|e| format!("Failed to create self-update proposal - {e}"))?;
+
+        let recipients = self.recipients(group);
+        self.backend
+            .send_msg(&GroupMessage::new(update_message.into(), &recipients))?;
+
+        drop(groups);
         self.persist_metadata()?;
 
         Ok(())
