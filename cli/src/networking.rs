@@ -38,6 +38,16 @@ pub fn post(url: &Url, msg: &impl Serialize) -> Result<Vec<u8>, String> {
     handle_response(response)
 }
 
+pub fn post_empty_unless_conflict(url: &Url) -> Result<bool, String> {
+    log::debug!("Post {url:?}");
+    match http_client().post(url.to_string()).send() {
+        Ok(response) if response.status() == StatusCode::OK => Ok(true),
+        Ok(response) if response.status() == StatusCode::CONFLICT => Ok(false),
+        Ok(response) => Err(format!("Error status code {:?}", response.status())),
+        Err(e) => Err(format!("ERROR: {e:?}")),
+    }
+}
+
 pub fn get(url: &Url) -> Result<Vec<u8>, String> {
     get_internal::<()>(url, None)
 }

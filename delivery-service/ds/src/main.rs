@@ -146,6 +146,21 @@ async fn reset(headers: HeaderMap, State(data): State<Arc<DsData>>) -> Response 
     StatusCode::OK.into_response()
 }
 
+/// Atomically reserve a group ID. A conflict means the ID is already known.
+async fn reserve_group(Path(path): Path<String>, State(data): State<Arc<DsData>>) -> Response {
+    let group_id = match base64::engine::general_purpose::URL_SAFE.decode(path) {
+        Ok(id) if !id.is_empty() => id,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let mut groups = data.groups.lock();
+    if groups.contains_key(&group_id) {
+        return StatusCode::CONFLICT.into_response();
+    }
+    groups.insert(group_id, 0);
+    StatusCode::OK.into_response()
+}
+
 /// Get the list of key packages for a given client `{id}`.
 /// This returns a serialised vector of `ClientKeyPackages` (see the `ds-lib`
 /// for details).
@@ -437,6 +452,7 @@ fn app(data: Arc<DsData>) -> Router {
         .route("/clients/key_package/{id}", get(consume_key_package))
         .route("/send/welcome", post(send_welcome))
         .route("/send/message", post(msg_send))
+        .route("/groups/{id}", post(reserve_group))
         .route("/recv/{id}", get(msg_recv))
         .route("/reset", get(reset))
         .route("/debug/dump", get(debug_dump))

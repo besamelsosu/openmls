@@ -43,6 +43,21 @@ async fn body_bytes(response: axum::response::Response) -> Bytes {
 }
 
 #[tokio::test]
+async fn group_ids_are_reserved_atomically() {
+    let app = app(Arc::new(DsData::default()));
+    let group_id = base64::engine::general_purpose::URL_SAFE.encode(b"group-id");
+    let path = format!("/groups/{group_id}");
+
+    let request = Request::post(&path).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let request = Request::post(&path).body(Body::empty()).unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn test_client_registration_and_key_packages() {
     let app = app(Arc::new(DsData::default()));
 

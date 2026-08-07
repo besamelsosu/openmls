@@ -18,10 +18,10 @@ mod user;
 
 const HELP: &str = "
  >>> Available commands:
-     - create group {group name}    create a new group
+     - create group                 create and enter a new UUID-named group
      - create kp                    create a new key package
      - exit                         exit the CLI
-     - group {group name}           enter group submenu for operations
+     - group {group ID prefix}      enter group submenu for operations
      - help                         print this help message
      - info                         show current user details
      - load {client name}           load the client state as a new client
@@ -49,7 +49,7 @@ enum Command {
     Register(String),
     Load(String),
     CreateKp,
-    CreateGroup(String),
+    CreateGroup,
     Group(String),
     Info,
     Update,
@@ -68,8 +68,8 @@ impl Command {
             Self::Load(name.trim().to_string())
         } else if input == "create kp" {
             Self::CreateKp
-        } else if let Some(group) = input.strip_prefix("create group ") {
-            Self::CreateGroup(group.trim().to_string())
+        } else if input == "create group" {
+            Self::CreateGroup
         } else if let Some(group) = input.strip_prefix("group ") {
             Self::Group(group.trim().to_string())
         } else if input == "info" {
@@ -333,19 +333,25 @@ fn main() {
                     println!(" >>> No client to update :(");
                 }
             }
-            Command::CreateGroup(group_name) => {
+            Command::CreateGroup => {
                 if let Some(c) = &mut client {
-                    match c.create_group(group_name.clone()) {
-                        Ok(()) => println!(" >>> Created group {group_name} :)"),
-                        Err(e) => println!("Error creating group {group_name} : {e}"),
+                    match c.create_group() {
+                        Ok(group_name) => {
+                            println!(" >>> Created group {group_name} :)");
+                            handle_group_loop(&mut rl, c, &group_name);
+                        }
+                        Err(e) => println!("Error creating group: {e}"),
                     }
                 } else {
                     println!(" >>> No client to create a group :(");
                 }
             }
-            Command::Group(group_name) => {
+            Command::Group(group_prefix) => {
                 if let Some(c) = &mut client {
-                    handle_group_loop(&mut rl, c, &group_name);
+                    match c.resolve_group_prefix(&group_prefix) {
+                        Ok(group_name) => handle_group_loop(&mut rl, c, &group_name),
+                        Err(e) => eprintln!(" >>> {e}"),
+                    }
                 } else {
                     println!(" >>> No client :(");
                 }
@@ -408,13 +414,11 @@ fn basic_test() {
     client_3.update(None).unwrap();
 
     // Client 1 creates a group.
-    client_1
-        .create_group("MLS Discussions".to_string())
-        .unwrap();
+    let group_name = client_1.create_group().unwrap();
 
     // Client 1 adds Client 2 to the group.
     client_1
-        .invite("Client2".to_string(), "MLS Discussions".to_string())
+        .invite("Client2".to_string(), group_name.clone())
         .unwrap();
 
     // Client 2 retrieves messages.
@@ -422,7 +426,7 @@ fn basic_test() {
 
     // Client 2 sends a message.
     client_2
-        .send_msg(MESSAGE_1, "MLS Discussions".to_string())
+        .send_msg(MESSAGE_1, group_name.clone())
         .unwrap();
 
     // Client 1 retrieves messages.
@@ -430,7 +434,7 @@ fn basic_test() {
 
     // Check that Client 1 received the message
     assert_eq!(
-        client_1.read_msgs("MLS Discussions".to_string()).unwrap(),
+        client_1.read_msgs(group_name.clone()).unwrap(),
         Some(vec![conversation::ConversationMessage::new(
             MESSAGE_1.to_owned(),
             "Client2".to_owned(),
@@ -439,12 +443,12 @@ fn basic_test() {
 
     // Client 2 tries to add Client 3 to the group (should fail).
     assert!(client_2
-        .invite("Client3".to_string(), "MLS Discussions".to_string())
+        .invite("Client3".to_string(), group_name.clone())
         .is_err());
 
     // Client 1 (admin) adds Client 3 to the group (should succeed).
     client_1
-        .invite("Client3".to_string(), "MLS Discussions".to_string())
+        .invite("Client3".to_string(), group_name.clone())
         .unwrap();
 
     // Everyone updates.
@@ -454,7 +458,7 @@ fn basic_test() {
 
     // Client 1 sends a message.
     client_1
-        .send_msg(MESSAGE_2, "MLS Discussions".to_string())
+        .send_msg(MESSAGE_2, group_name.clone())
         .unwrap();
 
     // Everyone updates.
@@ -464,14 +468,14 @@ fn basic_test() {
 
     // Check that Client 2 and Client 3 received the message
     assert_eq!(
-        client_2.read_msgs("MLS Discussions".to_string()).unwrap(),
+        client_2.read_msgs(group_name.clone()).unwrap(),
         Some(vec![conversation::ConversationMessage::new(
             MESSAGE_2.to_owned(),
             "Client1".to_owned(),
         )])
     );
     assert_eq!(
-        client_3.read_msgs("MLS Discussions".to_string()).unwrap(),
+        client_3.read_msgs(group_name.clone()).unwrap(),
         Some(vec![conversation::ConversationMessage::new(
             MESSAGE_2.to_owned(),
             "Client1".to_owned(),
@@ -480,12 +484,12 @@ fn basic_test() {
 
     // Client 2 (non-admin) tries to promote Client 3 (should fail).
     assert!(client_2
-        .promote("Client3".to_string(), "MLS Discussions".to_string())
+        .promote("Client3".to_string(), group_name.clone())
         .is_err());
 
     // Client 1 (admin) promotes Client 2 (should succeed).
     client_1
-        .promote("Client2".to_string(), "MLS Discussions".to_string())
+        .promote("Client2".to_string(), group_name.clone())
         .unwrap();
 
     // Everyone updates.
@@ -503,7 +507,7 @@ fn basic_test() {
 
     // Client 2 (now admin) adds Client 4 (should succeed).
     client_2
-        .invite("Client4".to_string(), "MLS Discussions".to_string())
+        .invite("Client4".to_string(), group_name.clone())
         .unwrap();
 
     // Everyone updates.
@@ -514,7 +518,7 @@ fn basic_test() {
 
     // Client 3 sends a message.
     client_3
-        .send_msg(MESSAGE_3, "MLS Discussions".to_string())
+        .send_msg(MESSAGE_3, group_name.clone())
         .unwrap();
 
     // Everyone updates.
@@ -525,14 +529,14 @@ fn basic_test() {
 
     // Check that Client 1 and Client 2 received the message
     assert_eq!(
-        client_1.read_msgs("MLS Discussions".to_string()).unwrap(),
+        client_1.read_msgs(group_name.clone()).unwrap(),
         Some(vec![
             conversation::ConversationMessage::new(MESSAGE_1.to_owned(), "Client2".to_owned()),
             conversation::ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
         ])
     );
     assert_eq!(
-        client_2.read_msgs("MLS Discussions".to_string()).unwrap(),
+        client_2.read_msgs(group_name.clone()).unwrap(),
         Some(vec![
             conversation::ConversationMessage::new(MESSAGE_2.to_owned(), "Client1".to_owned()),
             conversation::ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
@@ -541,7 +545,7 @@ fn basic_test() {
 
     // 1. Client 2 (admin) tries to demote Client 1 (admin) -> Should succeed.
     client_2
-        .demote("Client1".to_string(), "MLS Discussions".to_string())
+        .demote("Client1".to_string(), group_name.clone())
         .unwrap();
 
     // Everyone syncs the new epoch
@@ -553,18 +557,18 @@ fn basic_test() {
     // 2. Double-check that Client 1 is actually demoted:
     // Client 1 (now non-admin) tries to promote Client 3 -> Should fail.
     assert!(client_1
-        .promote("Client3".to_string(), "MLS Discussions".to_string())
+        .promote("Client3".to_string(), group_name.clone())
         .is_err());
 
     // 3. Check both-side admin validation:
     // Client 2 (admin) tries to demote Client 3 (already a non-admin) -> Should fail.
     assert!(client_2
-        .demote("Client3".to_string(), "MLS Discussions".to_string())
+        .demote("Client3".to_string(), group_name.clone())
         .is_err());
 
     // 4. Test safety guard:
     // Client 2 tries to demote themselves (Client 2 is the last remaining admin) -> Should fail.
     assert!(client_2
-        .demote("Client2".to_string(), "MLS Discussions".to_string())
+        .demote("Client2".to_string(), group_name.clone())
         .is_err());
 }

@@ -749,11 +749,15 @@ impl User {
         Ok(messages_out)
     }
 
-    /// Create a group with the given name.
-    pub fn create_group(&mut self, name: String) -> Result<(), String> {
-        if self.groups.borrow().contains_key(&name) {
-            return Err(format!("Group '{name}' already exists"));
-        }
+    /// Create a group with a UUID reserved on the delivery service.
+    pub fn create_group(&mut self) -> Result<String, String> {
+        let name = loop {
+            let candidate = uuid::Uuid::new_v4().to_string();
+            match self.backend.reserve_group(candidate.as_bytes())? {
+                true => break candidate,
+                false => continue,
+            }
+        };
 
         log::debug!("{} creates group {}", self.username(), name);
         let group_id = name.as_bytes();
@@ -810,9 +814,26 @@ impl User {
         };
 
         self.groups.borrow_mut().insert(name.clone(), group);
-        self.group_list.insert(name);
+        self.group_list.insert(name.clone());
         self.persist_metadata()?;
-        Ok(())
+        Ok(name)
+    }
+
+    /// Resolve a locally known group by an unambiguous prefix.
+    pub fn resolve_group_prefix(&self, prefix: &str) -> Result<String, String> {
+        let matches: Vec<_> = self
+            .group_names()
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .collect();
+        match matches.as_slice() {
+            [] => Err(format!("No group matches prefix '{prefix}'.")),
+            [name] => Ok(name.clone()),
+            _ => Err(format!(
+                "Group prefix '{prefix}' is ambiguous; it matches: {}",
+                matches.join(", ")
+            )),
+        }
     }
 
     fn ensure_can_commit(&self, group: &Group) -> Result<(), String> {

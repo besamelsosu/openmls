@@ -2,7 +2,7 @@ use base64::Engine;
 use tls_codec::{Deserialize, TlsVecU16};
 use url::Url;
 
-use crate::networking::get_with_body;
+use crate::networking::{get_with_body, post_empty_unless_conflict};
 
 use super::{
     networking::{get, post},
@@ -23,6 +23,14 @@ pub struct Backend {
 }
 
 impl Backend {
+    /// Atomically reserve a group ID on the delivery service.
+    pub fn reserve_group(&self, group_id: &[u8]) -> Result<bool, String> {
+        let mut url = self.ds_url.clone();
+        let encoded_id = base64::engine::general_purpose::URL_SAFE.encode(group_id);
+        url.set_path(&format!("/groups/{encoded_id}"));
+        post_empty_unless_conflict(&url)
+    }
+
     /// Register a new client with the server.
     pub fn register_client(
         &self,
