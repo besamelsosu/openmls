@@ -5,6 +5,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
 
 use crate::admin_list_gce::ADMIN_LIST_EXT_TYPE;
+use crate::user::KEY_PACKAGE_LIFETIME_SECONDS;
 
 use super::{openmls_rust_persistent_crypto::OpenMlsRustPersistentCrypto, serialize_any_hashmap};
 
@@ -32,6 +33,7 @@ impl Identity {
 
         KeyPackage::builder()
             .leaf_node_capabilities(capabilities)
+            .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_SECONDS))
             .build(ciphersuite, crypto, signer, credential_with_key.clone())
             .unwrap()
     }

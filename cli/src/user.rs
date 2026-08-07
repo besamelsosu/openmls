@@ -18,6 +18,26 @@ use super::{
 
 const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// LeafNode / KeyPackage lifetime duration, in seconds.
+/// Default: 3 × 28 days ≈ 3 months (matches the openmls library default).
+///
+/// Per RFC 9420 §7.2, applications MUST define a maximum total lifetime
+/// that is acceptable for a LeafNode and reject any LeafNode where the
+/// total lifetime is longer than this duration.
+pub(crate) const KEY_PACKAGE_LIFETIME_SECONDS: u64 = 60 * 60 * 24 * 28 * 3;
+
+/// Amount of time (in seconds) a KeyPackage lifetime is extended into the
+/// past to tolerate clock skew between clients.
+/// Default: 1 hour (matches the openmls library default).
+///
+/// **Note:** This constant is documentary. The margin is applied internally
+/// by [`Lifetime::new()`] in the core library — it subtracts this value
+/// from `now` when computing `not_before`.
+#[allow(dead_code)]
+pub(crate) const KEY_PACKAGE_LIFETIME_MARGIN_SECONDS: u64 = 60 * 60;
+
+pub(crate) const MAX_PAST_EPOCHS: usize = 3;
+
 pub struct Group {
     group_name: String,
     conversation: Conversation,
@@ -770,6 +790,8 @@ impl User {
             .use_ratchet_tree_extension(true)
             .with_group_context_extensions(extensions) // Inject the unpacked extensions collection
             .capabilities(capabilities)
+            .lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_SECONDS))
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
 
         let mls_group = MlsGroup::new_with_group_id(
@@ -1114,6 +1136,7 @@ impl User {
         // tree, we need to include the ratchet_tree_extension.
         let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
             .build();
         let staged_welcome =
             StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
