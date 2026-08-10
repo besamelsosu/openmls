@@ -2,19 +2,13 @@
 // extern crate clap;
 // use clap::App;
 
+#[cfg(test)]
+use cli::ConversationMessage;
+use cli::{Backend, User};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::env;
 use std::io::stdout;
-
-mod admin_list_gce;
-mod backend;
-mod conversation;
-mod identity;
-mod networking;
-mod openmls_rust_persistent_crypto;
-mod serialize_any_hashmap;
-mod user;
 
 const HELP: &str = "
  >>> Available commands:
@@ -142,7 +136,7 @@ fn print_help(help_text: &str) {
     print!("{help_text}");
 }
 
-fn print_user_info(client: &Option<user::User>) {
+fn print_user_info(client: &Option<User>) {
     match client {
         Some(client) => {
             let username = client.username();
@@ -162,7 +156,7 @@ fn print_user_info(client: &Option<user::User>) {
     }
 }
 
-fn print_group_info(client: &user::User, group_name: &str) {
+fn print_group_info(client: &User, group_name: &str) {
     match client.group_member_names(group_name) {
         Ok(member_names) => {
             let message_count = client.group_message_count(group_name).unwrap_or(0);
@@ -182,7 +176,7 @@ fn print_group_info(client: &user::User, group_name: &str) {
     }
 }
 
-fn update(client: &mut user::User, group_id: Option<String>) {
+fn update(client: &mut User, group_id: Option<String>) {
     match client.update(group_id) {
         Ok(messages) => {
             println!(" >>> Updated client :)");
@@ -197,7 +191,7 @@ fn update(client: &mut user::User, group_id: Option<String>) {
     }
 }
 
-fn handle_group_loop(rl: &mut DefaultEditor, client: &mut user::User, group_name: &str) {
+fn handle_group_loop(rl: &mut DefaultEditor, client: &mut User, group_name: &str) {
     let prompt = format!("{group_name} >>> ");
     loop {
         let line = match rl.readline(&prompt) {
@@ -312,7 +306,7 @@ fn main() {
         };
 
         match Command::parse(&line) {
-            Command::Register(client_name) => match user::User::new(client_name.clone()) {
+            Command::Register(client_name) => match User::new(client_name.clone()) {
                 Ok(mut user) => {
                     user.add_key_package();
                     user.add_key_package();
@@ -326,7 +320,7 @@ fn main() {
                 }
                 Err(e) => eprintln!("Error creating client {client_name} : {e}"),
             },
-            Command::Load(client_name) => match user::User::load(client_name.clone()) {
+            Command::Load(client_name) => match User::load(client_name.clone()) {
                 Ok(user) => {
                     client = Some(user);
                     println!("recovered client {client_name}");
@@ -373,7 +367,7 @@ fn main() {
                 }
             }
             Command::Reset => {
-                backend::Backend::default().reset_server();
+                Backend::default().reset_server();
                 client = None;
                 println!(" >>> Reset server :)");
             }
@@ -392,26 +386,26 @@ fn main() {
 #[ignore]
 fn basic_test() {
     // Reset the server before doing anything for testing.
-    backend::Backend::default().reset_server();
+    Backend::default().reset_server();
 
     const MESSAGE_1: &str = "Thanks for adding me Client1.";
     const MESSAGE_2: &str = "Welcome Client3.";
     const MESSAGE_3: &str = "Thanks so much for the warm welcome! 😊";
 
     // Create one client
-    let mut client_1 = user::User::new("Client1".to_string()).unwrap();
+    let mut client_1 = User::new("Client1".to_string()).unwrap();
     client_1.add_key_package();
     client_1.add_key_package();
     client_1.register().unwrap();
 
     // Create another client
-    let mut client_2 = user::User::new("Client2".to_string()).unwrap();
+    let mut client_2 = User::new("Client2".to_string()).unwrap();
     client_2.add_key_package();
     client_2.add_key_package();
     client_2.register().unwrap();
 
     // Create another client
-    let mut client_3 = user::User::new("Client3".to_string()).unwrap();
+    let mut client_3 = User::new("Client3".to_string()).unwrap();
     client_3.add_key_package();
     client_3.add_key_package();
     client_3.register().unwrap();
@@ -433,9 +427,7 @@ fn basic_test() {
     client_2.update(None).unwrap();
 
     // Client 2 sends a message.
-    client_2
-        .send_msg(MESSAGE_1, group_name.clone())
-        .unwrap();
+    client_2.send_msg(MESSAGE_1, group_name.clone()).unwrap();
 
     // Client 1 retrieves messages.
     client_1.update(None).unwrap();
@@ -443,7 +435,7 @@ fn basic_test() {
     // Check that Client 1 received the message
     assert_eq!(
         client_1.read_msgs(group_name.clone()).unwrap(),
-        Some(vec![conversation::ConversationMessage::new(
+        Some(vec![ConversationMessage::new(
             MESSAGE_1.to_owned(),
             "Client2".to_owned(),
         )])
@@ -465,9 +457,7 @@ fn basic_test() {
     client_3.update(None).unwrap();
 
     // Client 1 sends a message.
-    client_1
-        .send_msg(MESSAGE_2, group_name.clone())
-        .unwrap();
+    client_1.send_msg(MESSAGE_2, group_name.clone()).unwrap();
 
     // Everyone updates.
     client_1.update(None).unwrap();
@@ -477,14 +467,14 @@ fn basic_test() {
     // Check that Client 2 and Client 3 received the message
     assert_eq!(
         client_2.read_msgs(group_name.clone()).unwrap(),
-        Some(vec![conversation::ConversationMessage::new(
+        Some(vec![ConversationMessage::new(
             MESSAGE_2.to_owned(),
             "Client1".to_owned(),
         )])
     );
     assert_eq!(
         client_3.read_msgs(group_name.clone()).unwrap(),
-        Some(vec![conversation::ConversationMessage::new(
+        Some(vec![ConversationMessage::new(
             MESSAGE_2.to_owned(),
             "Client1".to_owned(),
         )])
@@ -506,7 +496,7 @@ fn basic_test() {
     client_3.update(None).unwrap();
 
     // Create client 4 to verify client 2 can now invite new members
-    let mut client_4 = user::User::new("Client4".to_string()).unwrap();
+    let mut client_4 = User::new("Client4".to_string()).unwrap();
     client_4.add_key_package();
     client_4.add_key_package();
     client_4.register().unwrap();
@@ -525,9 +515,7 @@ fn basic_test() {
     client_4.update(None).unwrap();
 
     // Client 3 sends a message.
-    client_3
-        .send_msg(MESSAGE_3, group_name.clone())
-        .unwrap();
+    client_3.send_msg(MESSAGE_3, group_name.clone()).unwrap();
 
     // Everyone updates.
     client_1.update(None).unwrap();
@@ -539,15 +527,15 @@ fn basic_test() {
     assert_eq!(
         client_1.read_msgs(group_name.clone()).unwrap(),
         Some(vec![
-            conversation::ConversationMessage::new(MESSAGE_1.to_owned(), "Client2".to_owned()),
-            conversation::ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
+            ConversationMessage::new(MESSAGE_1.to_owned(), "Client2".to_owned()),
+            ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
         ])
     );
     assert_eq!(
         client_2.read_msgs(group_name.clone()).unwrap(),
         Some(vec![
-            conversation::ConversationMessage::new(MESSAGE_2.to_owned(), "Client1".to_owned()),
-            conversation::ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
+            ConversationMessage::new(MESSAGE_2.to_owned(), "Client1".to_owned()),
+            ConversationMessage::new(MESSAGE_3.to_owned(), "Client3".to_owned())
         ])
     );
 

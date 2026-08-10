@@ -599,11 +599,10 @@ impl User {
             return Ok(());
         }
 
-        let has_pending_member_proposal = group
-            .mls_group
-            .borrow()
-            .pending_proposals()
-            .any(|queued| matches!(queued.proposal(), Proposal::Remove(_) | Proposal::Update(_)));
+        let has_pending_member_proposal =
+            group.mls_group.borrow().pending_proposals().any(|queued| {
+                matches!(queued.proposal(), Proposal::Remove(_) | Proposal::Update(_))
+            });
         if !has_pending_member_proposal {
             return Ok(());
         }
@@ -1104,7 +1103,7 @@ impl User {
     }
 
     /// Leave the group with the given name.
-    pub(crate) fn leave(&self, group_name: String) -> Result<(), String> {
+    pub fn leave(&self, group_name: String) -> Result<(), String> {
         // Get the group ID
 
         let mut groups = self.groups.borrow_mut();
@@ -1151,7 +1150,7 @@ impl User {
     }
 
     /// Propose an update of this member's leaf node.
-    pub(crate) fn self_update(&self, group_name: String) -> Result<(), String> {
+    pub fn self_update(&self, group_name: String) -> Result<(), String> {
         let mut groups = self.groups.borrow_mut();
         let group = groups
             .get_mut(&group_name)
@@ -1244,7 +1243,7 @@ impl User {
         }
     }
 
-    pub(crate) fn username(&self) -> String {
+    pub fn username(&self) -> String {
         self.identity.borrow().identity_as_string()
     }
 

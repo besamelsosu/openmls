@@ -5,6 +5,9 @@ authors = ["OpenMLS Authors"]
 edition = "2021"
 publish = false
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [features]
 # Forward feature to openmls and the storage backend.
 extensions-draft = [
